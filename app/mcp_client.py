@@ -16,7 +16,7 @@ from contextlib import AsyncExitStack
 from typing import Any
 
 from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.streamable_http import streamable_http_client
 
 _logger = logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ class MCPClient:
 
         # streamablehttp_client yields (read, write, get_session_id_callable)
         streams = await self._exit_stack.enter_async_context(
-            streamablehttp_client(self.server_url)
+            streamable_http_client(self.server_url)
         )
         read, write, _ = streams
 
