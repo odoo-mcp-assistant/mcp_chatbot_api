@@ -73,7 +73,6 @@ async def lifespan(_: FastAPI):   # receives the app instance but we don't need 
 # Create the FastAPI application object — this is the core of the whole API
 app = FastAPI(
     title="MCP Chatbot API",       # shown in the auto-generated API docs at /docs
-    version="0.1.0",               # shown in the auto-generated API docs
     description=(                  # shown in the auto-generated API docs
         "FastAPI sidecar for the Odoo MCP chatbot. "
         "Handles the async LLM + MCP agentic loop outside the Odoo "
@@ -97,6 +96,39 @@ app.add_middleware(
 # Register all routes defined in routers/chat.py under the /mcp_chatbot prefix
 # This adds: POST /mcp_chatbot/message, POST /mcp_chatbot/history, etc.
 app.include_router(chat_router.router)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## All the endpoints below are for testing health of other services and are not included in business logic 
+
+
+
+
+
 
 
 # Health check #1 — the simplest possible check: is the app process alive?
