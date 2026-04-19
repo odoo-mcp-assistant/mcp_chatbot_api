@@ -20,7 +20,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # from the .env file or from actual environment variables
 class Settings(BaseSettings):
 
-    # model_config tells pydantic-settings HOW to load the settings
+    # model_config tells pydantic-settings HOW to load the settings(fill variables in this file when names matches from .env )
     model_config = SettingsConfigDict(
         env_file=".env",            # read values from a file named .env in the project root
         env_file_encoding="utf-8",  # the .env file is encoded in UTF-8

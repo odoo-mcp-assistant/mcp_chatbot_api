@@ -167,6 +167,13 @@ async def process_message(
             temperature=0.7,
         )
         message = response.choices[0].message
+        reasoning = getattr(message, "reasoning_content", None) or getattr(message, "reasoning", None)
+        if reasoning:
+            _logger.info("agent: round %d reasoning: %s", round_num + 1, reasoning)
+        if message.content:
+            _logger.info("agent: round %d content: %s", round_num + 1, message.content)
+        if message.tool_calls:
+            _logger.info("agent: round %d tool_calls: %s", round_num + 1, [tc.function.name for tc in message.tool_calls])
 
         if not message.tool_calls:
             return _extract_reply(message), verified_partner_id
