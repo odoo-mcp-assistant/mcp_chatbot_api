@@ -98,6 +98,15 @@ app.add_middleware(
 app.include_router(chat_router.router)
 
 
+# Called by the Odoo addon after the admin saves chatbot settings
+# re-reads all mcp_chatbot.* keys from Odoo and refreshes the in-memory config snapshot
+@app.post("/reload_config")
+async def reload_config():
+    await aodoo(load_odoo_config)
+    _logger.info("reload_config: config reloaded from Odoo")
+    return {"status": "ok"}
+
+
 
 
 
