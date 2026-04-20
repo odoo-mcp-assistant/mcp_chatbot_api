@@ -61,6 +61,7 @@ class Settings(BaseSettings):
     # cors_origins_list is a computed property — it converts the raw comma-separated string
     # into a Python list that CORSMiddleware can actually use
     # e.g. "https://a.com, https://b.com" → ["https://a.com", "https://b.com"]
+    # @property in Python is a decorator that lets you turn a method into an attribute (getter) you can acces to it without getter .
     @property
     def cors_origins_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
