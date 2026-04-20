@@ -23,27 +23,25 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import get_settings
 
 # close_mcp: disconnects from the MCP server at shutdown
-# get_mcp: returns the already-connected MCP client (used in health check)
 # init_mcp: connects to the MCP server at startup and fetches available tools
-from .mcp_client import close_mcp, get_mcp, init_mcp
+from .mcp_client import close_mcp, init_mcp
 
-# aodoo: runs a synchronous Odoo call in a background thread so it doesn't block the app
 # connect: logs into Odoo at startup using credentials from .env
 # disconnect: drops the Odoo connection at shutdown
-# get_client: returns the already-connected Odoo client (used in health check)
-from .odoo_client import aodoo, connect, disconnect, get_client
+from .odoo_client import connect, disconnect
 
-# get_odoo_config: returns the already-loaded chatbot config snapshot from Odoo
 # load_odoo_config: reads chatbot settings (LLM model, system prompt, MCP URL, etc.) from Odoo at startup
-from .odoo_config import get_odoo_config, load_odoo_config
+from .odoo_config import load_odoo_config
 
-# chat_router: the file that contains all /mcp_chatbot/* endpoints (message, history, close, info)
+# chat_router: all /mcp_chatbot/* endpoints (message, history, close, info)
+# ops_router: all infrastructure endpoints (health checks, reload_config)
 from .routers import chat as chat_router
+from .routers import ops as ops_router
 
 
 # Configure the logging system: show INFO level and above, with timestamp + level + module name
 logging.basicConfig(
-    level=logging.INFO,                                    # show INFO, WARNING, ERROR (not DEBUG)
+    level=logging.INFO,                                     # show INFO, WARNING, ERROR (not DEBUG)
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",  # format: "2024-01-01 [INFO] app.main: ..."
 )
 
@@ -93,97 +91,8 @@ app.add_middleware(
     allow_headers=["*"],                         # allow all headers (including Authorization)
 )
 
-# Register all routes defined in routers/chat.py under the /mcp_chatbot prefix
-# This adds: POST /mcp_chatbot/message, POST /mcp_chatbot/history, etc.
+# Register all chat routes: POST /mcp_chatbot/message, /history, /close, /info
 app.include_router(chat_router.router)
 
-
-# Called by the Odoo addon after the admin saves chatbot settings
-# re-reads all mcp_chatbot.* keys from Odoo and refreshes the in-memory config snapshot
-@app.post("/reload_config")
-async def reload_config():
-    await aodoo(load_odoo_config)
-    _logger.info("reload_config: config reloaded from Odoo")
-    return {"status": "ok"}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-## All the endpoints below are for testing health of other services and are not included in business logic 
-
-
-
-
-
-
-
-# Health check #1 — the simplest possible check: is the app process alive?
-@app.get("/health")
-async def health():
-    return {"status": "ok"}   # if this returns, the app is running
-
-
-# Health check #2 — verifies the Odoo connection is alive and authenticated
-@app.get("/health/odoo")
-async def health_odoo():
-    odoo = get_client()                            # get the connected Odoo client singleton
-    user_name = await aodoo(lambda: odoo.env.user.name)  # ask Odoo for the logged-in user's name (in a thread)
-    return {
-        "status": "ok",
-        "odoo_version": odoo.version,              # e.g. "16.0"
-        "odoo_db": get_settings().odoo_db,         # the database name from .env
-        "logged_in_as": user_name,                 # confirms which Odoo user this app authenticated as
-    }
-
-
-# Health check #3 — verifies the MCP server is connected and lists its available tools
-@app.get("/health/mcp")
-async def health_mcp():
-    mcp = get_mcp()          # get the connected MCP client singleton
-    cfg = get_odoo_config()  # get the cached chatbot config (contains the MCP server URL)
-    return {
-        "status": "ok",
-        "server_url": cfg.mcp_server_url,                              # the URL of the MCP server
-        "tool_count": len(mcp.tool_schemas),                           # how many tools the MCP server exposes
-        "tools": [s["function"]["name"] for s in mcp.tool_schemas],   # list of tool names (e.g. get_orders)
-    }
-
-
-# Health check #4 — shows the active chatbot configuration (no secrets exposed)
-@app.get("/health/config")
-async def health_config():
-    cfg = get_odoo_config()   # get the cached chatbot config snapshot loaded from Odoo at startup
-    return {
-        "bot_name": cfg.bot_name,              # the display name of the chatbot (e.g. "Aria")
-        "status": cfg.status,                  # "active" or "inactive" — controls whether the widget responds
-        "mcp_server_url": cfg.mcp_server_url,  # URL of the MCP server this app is connected to
-        "llm_model": cfg.llm.model_name,       # the AI model being used (e.g. "gpt-4o")
-        "llm_base_url": cfg.llm.base_url,      # the API base URL for the LLM provider
-        "summary_model": cfg.summary_llm.model_name,   # the model used to compress long conversation history
-        "max_tool_rounds": cfg.max_tool_rounds,        # max times the AI can call tools in one message turn
-        "summary_interval": cfg.summary_interval,      # how many tokens before history gets compressed
-        "idle_timeout": cfg.idle_timeout,              # minutes of inactivity before a session is auto-closed
-    }
+# Register all ops routes: GET /health, /health/odoo, /health/mcp, /health/config, POST /reload_config
+app.include_router(ops_router.router)
