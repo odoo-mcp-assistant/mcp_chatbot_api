@@ -9,7 +9,6 @@ Lifecycle is owned by the FastAPI lifespan hook in main.py: connect at
 startup, close at shutdown. The MCP session is a long-lived singleton
 per worker process — all concurrent chat requests share it.
 """
-from __future__ import annotations
 
 import logging
 from contextlib import AsyncExitStack

@@ -5,7 +5,6 @@ Facts are durable per-partner records written by the `remember_fact`
 local tool inside the agentic loop. They're read whole on every chat
 request and injected as a single system message — no retrieval/ranking.
 """
-from __future__ import annotations
 
 import logging
 

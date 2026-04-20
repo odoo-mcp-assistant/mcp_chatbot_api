@@ -4,7 +4,6 @@ Cached AsyncOpenAI clients keyed by (api_key, base_url).
 Instantiating AsyncOpenAI is not free — it sets up an httpx AsyncClient
 underneath. Cache per-worker so we reuse connections across requests.
 """
-from __future__ import annotations
 
 from openai import AsyncOpenAI
 

@@ -22,8 +22,6 @@ Keys read
     mcp_chatbot.summary_model_id     (falls back to main)
 """
 
-# allows using "OdooConfig | None" syntax in older Python versions
-from __future__ import annotations
 
 # logging: used to print info/warning messages from this module
 import logging

@@ -8,7 +8,6 @@ then invokes the agentic loop and persists results.
 
 Ported from `mcp_chatbot/controllers/chatbot_controller.py::receive_message`.
 """
-from __future__ import annotations
 
 import logging
 

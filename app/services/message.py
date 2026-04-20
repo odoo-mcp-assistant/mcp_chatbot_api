@@ -1,5 +1,4 @@
 """Message CRUD via odoorpc."""
-from __future__ import annotations
 
 from ..odoo_client import aodoo, get_client
 

@@ -1,5 +1,4 @@
 """Pydantic request/response models for the HTTP endpoints."""
-from __future__ import annotations
 
 from pydantic import BaseModel, Field
 

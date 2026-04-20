@@ -5,7 +5,6 @@ Every call wraps a synchronous odoorpc block with `aodoo()`. Return
 values are plain dicts (never odoorpc recordsets) so they're safe to
 pass around the event loop and across request boundaries.
 """
-from __future__ import annotations
 
 import logging
 from typing import Any

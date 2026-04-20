@@ -6,7 +6,6 @@ Three user types:
   2. OTP-verified contact — partner exists, no portal account.
   3. Portal login OR OTP-verified with an existing portal account.
 """
-from __future__ import annotations
 
 from ..odoo_client import aodoo, get_client
 

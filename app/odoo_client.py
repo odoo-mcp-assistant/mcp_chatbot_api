@@ -16,7 +16,6 @@ Design choices
   app refuses to boot. Better to fail immediately than have every chat
   request error out at runtime.
 """
-from __future__ import annotations
 
 import asyncio
 import logging

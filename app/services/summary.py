@@ -4,7 +4,6 @@ Conversation history summarisation via the summary LLM.
 Pure async — uses AsyncOpenAI directly, never touches Odoo during the
 call. The summary text is written back to the session by the caller.
 """
-from __future__ import annotations
 
 import logging
 

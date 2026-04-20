@@ -17,7 +17,6 @@ singletons to warm up. Just a flat top-to-bottom function that:
   3. If the cap is reached, forces a plain-text wrap-up (with no tools
      advertised, because some LLM providers 400 on `tool_choice="none"`).
 """
-from __future__ import annotations
 
 import asyncio
 import json

@@ -1,5 +1,4 @@
 """Chat + history + close + info endpoints. All require a JWT."""
-from __future__ import annotations
 
 import logging
 from typing import Annotated
