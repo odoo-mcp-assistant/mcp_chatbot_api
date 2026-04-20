@@ -1,14 +1,32 @@
 """Chat + history + close + info endpoints. All require a JWT."""
 
 import logging
+
+# Annotated: lets us combine a type hint with metadata (used below with Depends)
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+# APIRouter: groups related endpoints under a common prefix/tags — mounted on the app in main.py
+# BackgroundTasks: schedules functions to run AFTER the HTTP response is sent to the client
+# Depends: injects the result of another function (here: current_principal) into the route
+# HTTPException: raised to return an HTTP error response (e.g. 400, 401)
+# status: namespace of HTTP status code constants (status.HTTP_400_BAD_REQUEST = 400)
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 
+# Principal: dataclass describing the authenticated caller (partner_id / session_token / anonymous)
+# current_principal: FastAPI dependency that verifies the JWT and returns a Principal
 from ..auth import Principal, current_principal
+
+# handle_chat: the orchestrator that runs the agent loop, saves messages, and triggers summaries
 from ..chat_pipeline import handle_chat
+
+# aodoo: runs a synchronous odoorpc block in a thread pool so it doesn't block the event loop
+# get_client: returns the shared odoorpc connection (opened once at startup)
 from ..odoo_client import aodoo, get_client
+
+# get_odoo_config: returns the cached Odoo settings snapshot (bot name, status, LLM config, etc.)
 from ..odoo_config import get_odoo_config
+
+# Pydantic request/response models — FastAPI uses them for validation + OpenAPI docs
 from ..schemas import (
     CloseRequest,
     CloseResponse,
@@ -18,73 +36,108 @@ from ..schemas import (
     MessageRequest,
     MessageResponse,
 )
-from ..services import message as message_svc, session as session_svc
+
+# service layer — each module wraps odoorpc calls for one Odoo model
+from ..services import (
+    fact_extractor as fact_extractor_svc,
+    message as message_svc,
+    session as session_svc,
+)
 
 _logger = logging.getLogger(__name__)
 
+# all endpoints in this router are served under /mcp_chatbot/...
+# tags=["chatbot"] groups them together in the auto-generated /docs page
 router = APIRouter(prefix="/mcp_chatbot", tags=["chatbot"])
 
 
+# POST /mcp_chatbot/message — the main chat endpoint
+# response_model=MessageResponse makes FastAPI validate and serialize the return value
 @router.post("/message", response_model=MessageResponse)
 async def post_message(
-    body: MessageRequest,
+    body: MessageRequest,   # request body parsed and validated against MessageRequest
+    # Depends(current_principal) tells FastAPI to call current_principal first, verify the JWT,
+    # and pass the resulting Principal into this function as `principal`
     principal: Annotated[Principal, Depends(current_principal)],
 ):
+    # trim whitespace — if the message is empty after stripping, reject it
     user_message = body.message.strip()
     if not user_message:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="message is required",
         )
+    # anonymous callers must carry a session_token so we can group their messages into one session
+    # (logged-in callers are identified by partner_id instead — no session_token needed)
     if not principal.is_authenticated and not principal.session_token:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="session_token is required for anonymous users",
         )
 
+    # delegate the real work to the pipeline — it runs the agent loop, persists messages,
+    # and returns (reply_text, did_summarize) where did_summarize flags that history was compacted
     reply, did_summarize = await handle_chat(principal, user_message)
     return MessageResponse(reply=reply, summarized=did_summarize)
 
 
+# POST /mcp_chatbot/history — returns the conversation messages for the caller's open session
 @router.post("/history", response_model=HistoryResponse)
 async def get_history(
     principal: Annotated[Principal, Depends(current_principal)],
 ):
+    # look up the session differently depending on who the caller is
     if principal.partner_id:
+        # logged-in user — find their most recent OPEN session
         sess = await session_svc.lookup_open_by_partner(principal.partner_id)
     elif principal.session_token:
+        # anonymous user — find the session attached to their token (open or closed)
         sess = await session_svc.lookup_by_token(principal.session_token)
     else:
+        # no identity at all → no history to return
         return HistoryResponse(status="not_found", messages=[])
 
     if not sess:
         return HistoryResponse(status="not_found", messages=[])
+    # if the session exists but has been closed, return empty messages with status="closed"
+    # so the frontend can decide whether to start a new one
     if sess.get("state") == "closed":
         return HistoryResponse(status="closed", messages=[])
 
+    # session is open → fetch its messages in chronological order and return them
     msgs = await message_svc.list_by_session(sess["id"])
     return HistoryResponse(
         status="open",
+        # unpack each {"role": ..., "content": ...} dict into a HistoryMessage pydantic model
         messages=[HistoryMessage(**m) for m in msgs],
     )
 
 
+# POST /mcp_chatbot/close — end the current session, optionally recording a rating + feedback
 @router.post("/close", response_model=CloseResponse)
 async def close_session(
     body: CloseRequest,
     principal: Annotated[Principal, Depends(current_principal)],
+    # BackgroundTasks is injected by FastAPI — tasks added to it run AFTER the response is sent,
+    # so the client doesn't wait for fact extraction (which makes an LLM call)
+    background_tasks: BackgroundTasks,
 ):
+    # same lookup logic as /history — find the caller's open session
     if principal.partner_id:
         sess = await session_svc.lookup_open_by_partner(principal.partner_id)
     elif principal.session_token:
         sess = await session_svc.lookup_by_token(principal.session_token)
     else:
+        # nothing to close → respond success (idempotent)
         return CloseResponse()
 
+    # nothing to close if no session exists or it's already closed
     if not sess or sess.get("state") == "closed":
         return CloseResponse()
 
     session_id = sess["id"]
+    # if the caller included a valid rating, persist it as a separate rating record
+    # (ratings are a distinct Odoo model linked to the session)
     if body.rating in ("bad", "neutral", "good"):
         try:
             await session_svc.save_rating(
@@ -94,24 +147,47 @@ async def close_session(
                 partner_id=sess.get("partner_id"),
             )
         except Exception as exc:
+            # rating save is non-critical — log and carry on so we still close the session
             _logger.warning("close: failed to save rating: %s", exc)
 
+    # mark the Odoo session as closed
     await session_svc.close_session(session_id)
+
+    # schedule fact extraction to run in the background AFTER the response is sent
+    # only makes sense for authenticated sessions — anonymous users have no partner to save facts to
+    session_partner_id = sess.get("partner_id")
+    if session_partner_id:
+        cfg = get_odoo_config()
+        background_tasks.add_task(
+            fact_extractor_svc.extract_and_save,
+            session_id=session_id,
+            partner_id=session_partner_id,
+            llm=cfg.llm,   # use the main LLM — fact extraction needs the stronger model
+        )
+
     return CloseResponse()
 
 
+# POST /mcp_chatbot/info — returns bot metadata + whether the caller is logged in
+# the widget calls this on load to show "Hi, <first_name>!" and to render the bot's display name
 @router.post("/info", response_model=InfoResponse)
 async def get_info(
     principal: Annotated[Principal, Depends(current_principal)],
 ):
+    # cached Odoo settings (bot name, status) — no extra RPC call here
     cfg = get_odoo_config()
 
+    # default — anonymous users don't have a name to show
     first_name = ""
     if principal.partner_id:
+        # logged-in user → fetch their partner name from Odoo, take the first word only
+        # inner function because odoorpc calls are synchronous — we wrap them in aodoo()
+        # so they run in a thread pool instead of blocking the asyncio event loop
         def _read_name():
             odoo = get_client()
             partner = odoo.env["res.partner"].browse(principal.partner_id)
             name = partner.read(["name"])[0].get("name") or ""
+            # "Mohamed Dridi" → "Mohamed"  (simple split on the first space)
             return name.strip().split(" ")[0] if name else ""
         first_name = await aodoo(_read_name)
 

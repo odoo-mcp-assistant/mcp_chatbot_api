@@ -53,9 +53,9 @@ _logger = logging.getLogger(__name__)
 # frozen=True means its fields cannot be changed after creation
 @dataclass(frozen=True)
 class Principal:
-    partner_id: int | None      # the Odoo partner ID — set for logged-in users, None for anonymous
-    session_token: str | None   # random string identifying an anonymous session — None for logged-in users
-    anonymous: bool             # True if the user is not logged into Odoo
+    partner_id: int | None      
+    session_token: str | None   
+    anonymous: bool             
 
     @property
     def is_authenticated(self) -> bool:

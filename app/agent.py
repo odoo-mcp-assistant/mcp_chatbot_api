@@ -5,10 +5,8 @@ Replaces the original Odoo addon's `_async_process_message`. Natively
 async — no thread bridge, no `run_coroutine_threadsafe`, no global
 singletons to warm up. Just a flat top-to-bottom function that:
 
-  1. Sends the conversation to the LLM with the union of MCP tools +
-     local tools (currently just `remember_fact`).
+  1. Sends the conversation to the LLM with the MCP tool catalog.
   2. Loops on tool calls up to `cfg.max_tool_rounds`:
-       - `remember_fact`              → handled locally, writes to Odoo.
        - `verify_email_otp`           → session_id injected, success result
                                         promotes the in-flight partner_id.
        - tools in AUTH_REQUIRED_TOOLS → partner_id injected, or blocked
@@ -16,6 +14,9 @@ singletons to warm up. Just a flat top-to-bottom function that:
        - anything else                → forwarded to the MCP server.
   3. If the cap is reached, forces a plain-text wrap-up (with no tools
      advertised, because some LLM providers 400 on `tool_choice="none"`).
+
+Fact memory is handled post-session by `services.fact_extractor`; the
+agent no longer has a `remember_fact` tool.
 """
 
 import asyncio
@@ -25,7 +26,6 @@ import logging
 from .llm_client import get_async_openai
 from .mcp_client import get_mcp
 from .odoo_config import OdooConfig
-from .services import fact as fact_svc
 
 _logger = logging.getLogger(__name__)
 
@@ -45,41 +45,6 @@ AUTH_REQUIRED_TOOLS = {
 }
 
 
-# Tools implemented inside FastAPI — never forwarded to the MCP server.
-LOCAL_TOOL_SCHEMAS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "remember_fact",
-            "description": (
-                "Save a durable fact about the user. Use only for statements "
-                "the user explicitly wants remembered, or durable attributes: "
-                "preferences, ecosystem, dislikes, allergies, profession, "
-                "lifestyle. Do NOT use for ephemeral context, product mentions, "
-                "or inventory data."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "text": {
-                        "type": "string",
-                        "description": "The fact, as a concise standalone sentence.",
-                    },
-                    "category": {
-                        "type": "string",
-                        "description": (
-                            "Short label: preference, ecosystem, dislike, "
-                            "health, profession, lifestyle, general."
-                        ),
-                    },
-                },
-                "required": ["text"],
-            },
-        },
-    },
-]
-
-
 AUTH_REQUIRED_SUGGESTION = (
     "This action requires a verified identity. "
     "The user can either sign in to their account, "
@@ -96,23 +61,6 @@ AUTH_REQUIRED_SUGGESTION = (
     "IMPORTANT: Each step requires a separate user reply. "
     "Do NOT combine steps. Send one short message per step and wait."
 )
-
-
-async def _handle_remember_fact(
-    partner_id: int | None, args: dict,
-) -> str:
-    if not partner_id:
-        return json.dumps({
-            "success": False,
-            "error": "Cannot save facts for anonymous users.",
-        })
-    text = (args or {}).get("text") or ""
-    text = text.strip()
-    if not text:
-        return json.dumps({"success": False, "error": "text is required"})
-    category = ((args or {}).get("category") or "general").strip() or "general"
-    fact_id = await fact_svc.save(partner_id, text, category)
-    return json.dumps({"success": True, "id": fact_id, "category": category})
 
 
 def _extract_reply(msg) -> str:
@@ -141,7 +89,7 @@ async def process_message(
     the caller uses it to persist the session→partner link.
     """
     mcp = get_mcp()
-    tool_schemas = mcp.tool_schemas + LOCAL_TOOL_SCHEMAS
+    tool_schemas = mcp.tool_schemas
     llm = get_async_openai(cfg.llm.api_key, cfg.llm.base_url)
 
     conversation: list[dict] = [{"role": "system", "content": cfg.system_prompt}]
@@ -217,35 +165,29 @@ async def process_message(
                 "agent: round %d → '%s' args=%s", round_num + 1, name, args,
             )
 
-            # Dispatch: local tool or forward to MCP
-            if name == "remember_fact":
-                result_text = await _handle_remember_fact(
-                    authenticated_partner_id, args,
-                )
-            else:
-                try:
-                    mcp_result = await mcp.call_tool(name, arguments=args)
-                    result_text = str(mcp_result.content)
+            try:
+                mcp_result = await mcp.call_tool(name, arguments=args)
+                result_text = str(mcp_result.content)
 
-                    # verify_email_otp success → promote partner_id in-flight
-                    # so tools called later in THIS same turn see the verified id.
-                    if name == "verify_email_otp":
-                        try:
-                            raw = (
-                                mcp_result.content[0].text
-                                if mcp_result.content else "{}"
-                            )
-                            parsed = json.loads(raw)
-                            if parsed.get("success") and parsed.get("partner_id"):
-                                authenticated_partner_id = parsed["partner_id"]
-                                verified_partner_id = parsed["partner_id"]
-                        except Exception as exc:
-                            _logger.debug(
-                                "agent: verify_email_otp parse failed: %s", exc,
-                            )
-                except Exception as exc:
-                    _logger.exception("agent: tool '%s' failed: %s", name, exc)
-                    result_text = json.dumps({"error": str(exc)})
+                # verify_email_otp success → promote partner_id in-flight
+                # so tools called later in THIS same turn see the verified id.
+                if name == "verify_email_otp":
+                    try:
+                        raw = (
+                            mcp_result.content[0].text
+                            if mcp_result.content else "{}"
+                        )
+                        parsed = json.loads(raw)
+                        if parsed.get("success") and parsed.get("partner_id"):
+                            authenticated_partner_id = parsed["partner_id"]
+                            verified_partner_id = parsed["partner_id"]
+                    except Exception as exc:
+                        _logger.debug(
+                            "agent: verify_email_otp parse failed: %s", exc,
+                        )
+            except Exception as exc:
+                _logger.exception("agent: tool '%s' failed: %s", name, exc)
+                result_text = json.dumps({"error": str(exc)})
 
             conversation.append({
                 "role": "tool",
