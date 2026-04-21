@@ -157,7 +157,7 @@ async def close_session(
             fact_extractor_svc.extract_and_save,
             session_id=session_id,
             partner_id=session_partner_id,
-            llm=cfg.llm,   # use the main LLM — fact extraction needs the stronger model
+            llm=cfg.fact_llm,
         )
 
     return CloseResponse()

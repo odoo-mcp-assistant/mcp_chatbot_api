@@ -20,6 +20,9 @@ Keys read
     mcp_chatbot.summary_api_key      (falls back to main)
     mcp_chatbot.summary_base_url     (falls back to main)
     mcp_chatbot.summary_model_id     (falls back to main)
+    mcp_chatbot.fact_api_key         (falls back to main)
+    mcp_chatbot.fact_base_url        (falls back to main)
+    mcp_chatbot.fact_model_id        (falls back to main)
 """
 
 
@@ -55,8 +58,9 @@ class OdooConfig:
     idle_timeout: int      
     bot_name: str          
     status: str            
-    llm: LLMConfig         
-    summary_llm: LLMConfig 
+    llm: LLMConfig
+    summary_llm: LLMConfig
+    fact_llm: LLMConfig
 
 
 # module-level variable that stores the loaded config in memory
@@ -101,20 +105,27 @@ def load_odoo_config() -> OdooConfig:
     main_model    = _resolve_model(odoo, param.get_param("mcp_chatbot.llm_model_id") or "") 
 
     # --- Read summary LLM settings (fall back to main LLM if not configured separately) ---
-    summary_api_key  = param.get_param("mcp_chatbot.summary_api_key")  or main_api_key  
-    summary_base_url = param.get_param("mcp_chatbot.summary_base_url") or main_base_url  
-    summary_model    = _resolve_model(odoo, param.get_param("mcp_chatbot.summary_model_id") or "") or main_model  
+    summary_api_key  = param.get_param("mcp_chatbot.summary_api_key")  or main_api_key
+    summary_base_url = param.get_param("mcp_chatbot.summary_base_url") or main_base_url
+    summary_model    = _resolve_model(odoo, param.get_param("mcp_chatbot.summary_model_id") or "") or main_model
+
+    # --- Read fact-extraction LLM settings (fall back to main LLM if not configured separately) ---
+    fact_api_key  = param.get_param("mcp_chatbot.fact_api_key")  or main_api_key
+    fact_base_url = param.get_param("mcp_chatbot.fact_base_url") or main_base_url
+    fact_model    = _resolve_model(odoo, param.get_param("mcp_chatbot.fact_model_id") or "") or main_model
+
     # --- Build the immutable config snapshot ---
     cfg = OdooConfig(
-        mcp_server_url  = param.get_param("mcp_chatbot.mcp_server_url") or "",               
-        system_prompt   = param.get_param("mcp_chatbot.system_prompt") or "",                
-        max_tool_rounds = int(param.get_param("mcp_chatbot.max_tool_rounds") or "5"),        
-        summary_interval= int(param.get_param("mcp_chatbot.summary_interval") or "2000"),   
-        idle_timeout    = int(param.get_param("mcp_chatbot.idle_timeout") or "30"),          
-        bot_name        = param.get_param("mcp_chatbot.bot_name") or "AI Assistant",        
-        status          = param.get_param("mcp_chatbot.status") or "online",                
-        llm             = LLMConfig(main_api_key, main_base_url, main_model),               
-        summary_llm     = LLMConfig(summary_api_key, summary_base_url, summary_model),   
+        mcp_server_url  = param.get_param("mcp_chatbot.mcp_server_url") or "",
+        system_prompt   = param.get_param("mcp_chatbot.system_prompt") or "",
+        max_tool_rounds = int(param.get_param("mcp_chatbot.max_tool_rounds") or "5"),
+        summary_interval= int(param.get_param("mcp_chatbot.summary_interval") or "2000"),
+        idle_timeout    = int(param.get_param("mcp_chatbot.idle_timeout") or "30"),
+        bot_name        = param.get_param("mcp_chatbot.bot_name") or "AI Assistant",
+        status          = param.get_param("mcp_chatbot.status") or "online",
+        llm             = LLMConfig(main_api_key, main_base_url, main_model),
+        summary_llm     = LLMConfig(summary_api_key, summary_base_url, summary_model),
+        fact_llm        = LLMConfig(fact_api_key, fact_base_url, fact_model),
     )
 
     _cached = cfg   # store in memory so get_odoo_config() can return it without re-reading Odoo
