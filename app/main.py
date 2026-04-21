@@ -30,11 +30,8 @@ from .mcp_client import close_mcp, init_mcp
 # disconnect: drops the Odoo connection at shutdown
 from .odoo_client import connect, disconnect
 
-# load_odoo_config: reads chatbot settings (LLM model, system prompt, MCP URL, etc.) from Odoo at startup
 from .odoo_config import load_odoo_config
 
-# chat_router: all /mcp_chatbot/* endpoints (message, history, close, info)
-# ops_router: all infrastructure endpoints (health checks, reload_config)
 from .routers import chat as chat_router
 from .routers import ops as ops_router
 

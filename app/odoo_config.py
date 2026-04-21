@@ -23,7 +23,6 @@ Keys read
 """
 
 
-# logging: used to print info/warning messages from this module
 import logging
 
 # dataclass: decorator that auto-generates __init__, __repr__, etc. from class fields
@@ -40,8 +39,8 @@ _logger = logging.getLogger(__name__)
 # LLMConfig holds the 3 things needed to call any LLM API
 @dataclass(frozen=True)
 class LLMConfig:
-    api_key: str    # the API key to authenticate with the LLM provider (e.g. NVIDIA, OpenAI)
-    base_url: str   # the base URL of the LLM API (e.g. https://integrate.api.nvidia.com/v1)
+    api_key: str    
+    base_url: str   
     model_name: str # the exact model identifier to use (e.g. "zhipuai/glm-4-9b")
 
 
@@ -49,20 +48,20 @@ class LLMConfig:
 # frozen=True means once loaded, nothing can accidentally mutate these values
 @dataclass(frozen=True)
 class OdooConfig:
-    mcp_server_url: str    # URL of the MCP server that exposes Odoo tools to the AI
-    system_prompt: str     # the initial instruction given to the LLM at the start of every conversation
-    max_tool_rounds: int   # maximum number of times the AI can call tools in one message turn before being forced to reply
-    summary_interval: int  # estimated token count after which conversation history gets compressed into a summary
-    idle_timeout: int      # minutes of user inactivity before a session is automatically closed
-    bot_name: str          # display name of the chatbot shown in the widget
-    status: str            # "online" or "offline" — controls whether the widget accepts new messages
-    llm: LLMConfig         # config for the main LLM (used for the agent loop and tool calls)
-    summary_llm: LLMConfig # config for the summary LLM (used to compress long conversations — can be a cheaper/faster model)
+    mcp_server_url: str    
+    system_prompt: str     
+    max_tool_rounds: int   
+    summary_interval: int
+    idle_timeout: int      
+    bot_name: str          
+    status: str            
+    llm: LLMConfig         
+    summary_llm: LLMConfig 
 
 
 # module-level variable that stores the loaded config in memory
 # None means config hasn't been loaded yet — set once at startup by load_odoo_config()
-_cached: OdooConfig | None = None
+_cached: OdooConfig | None   = None
 
 
 def _resolve_model(odoo, model_id_raw: str) -> str:
@@ -78,15 +77,12 @@ def _resolve_model(odoo, model_id_raw: str) -> str:
             return ""
 
         if rec.provider_id:
-            # model has a provider (e.g. provider="zhipuai", name="glm-4-9b")
-            # combine them as "zhipuai/glm-4-9b" — the format NVIDIA and most APIs expect
             return f"{rec.provider_id.name}/{rec.name}"
 
         # model has no provider — return just the name as-is
         return rec.name
 
     except Exception as exc:
-        # log a warning instead of crashing — the agent loop will fail later with a clearer error
         _logger.warning("resolve_model failed for id=%r: %s", model_id_raw, exc)
         return ""
 
@@ -95,7 +91,7 @@ def load_odoo_config() -> OdooConfig:
     """Synchronous read from Odoo. Called at startup (before the event
     loop gets busy) and from reload_odoo_config() via aodoo()."""
 
-    global _cached          # we will write to the module-level _cached variable
+    global _cached          
     odoo = get_client()     # get the connected odoorpc client
     param = odoo.env["ir.config_parameter"]   # Odoo's key-value settings table
 

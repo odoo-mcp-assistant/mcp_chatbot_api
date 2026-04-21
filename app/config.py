@@ -22,16 +22,15 @@ class Settings(BaseSettings):
 
     # model_config tells pydantic-settings HOW to load the settings(fill variables in this file when names matches from .env )
     model_config = SettingsConfigDict(
-        env_file=".env",            # read values from a file named .env in the project root
-        env_file_encoding="utf-8",  # the .env file is encoded in UTF-8
-        case_sensitive=False,       # ODOO_HOST and odoo_host are treated as the same variable
+        env_file=".env",            
+        env_file_encoding="utf-8",  
+        case_sensitive=False,       
         extra="ignore",             # if .env has extra variables we don't define here, silently ignore them
     )
 
-    # --- FastAPI server settings ---
-    api_host: str = "0.0.0.0"   # the network interface to bind to — 0.0.0.0 means accept connections from anywhere
-    api_port: int = 8020         # the port the FastAPI server listens on
-    log_level: str = "info"      # the logging verbosity level passed to uvicorn
+    api_host: str = "0.0.0.0"   
+    api_port: int = 8020         
+    log_level: str = "info"      
 
     # --- CORS setting ---
     # comma-separated list of allowed origins, e.g. "https://myshop.odoo.com,http://localhost:8069"
@@ -40,18 +39,18 @@ class Settings(BaseSettings):
 
     # --- Odoo connection settings ---
     # these are used by odoorpc to log into Odoo at startup
-    odoo_host: str = "localhost"  # hostname or IP of the Odoo server
-    odoo_port: int = 8069         # port Odoo is running on (default Odoo port)
-    odoo_db: str                  # the Odoo database name — NO default, must be set in .env
-    odoo_user: str                # the Odoo username this app logs in as — NO default, must be set in .env
-    odoo_password: str            # the Odoo password — NO default, must be set in .env
+    odoo_host: str = "localhost"  
+    odoo_port: int = 8069         
+    odoo_db: str                  
+    odoo_user: str                
+    odoo_password: str            
 
     # --- JWT settings ---
     # the JWT secret must match the value stored in Odoo's ir.config_parameter['mcp_chatbot.jwt_secret']
     # because Odoo mints the token and this app verifies it — they must share the same secret
-    jwt_secret: str               # the shared secret used to sign and verify JWT tokens — NO default, must be set in .env
-    jwt_algorithm: str = "HS256"  # the signing algorithm — HS256 is the standard symmetric algorithm
-    jwt_audience: str = "mcp-chatbot-api"  # the expected "aud" claim in the token — must match what Odoo puts in the token
+    jwt_secret: str               
+    jwt_algorithm: str = "HS256"  
+    jwt_audience: str = "mcp-chatbot-api"  
 
     # --- Agentic loop timeout ---
     # 118 seconds = just under 2 minutes, intentionally just under nginx/proxy default timeout of 120s
