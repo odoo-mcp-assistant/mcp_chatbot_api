@@ -27,11 +27,7 @@ Token claims
 
 import logging
 
-# dataclass: auto-generates __init__ and makes the class behave like a data container
 from dataclasses import dataclass
-
-# Annotated: lets us attach metadata to a type hint (used to declare Header parameters)
-from typing import Annotated
 
 # Header: tells FastAPI to read a value from the HTTP request headers
 # HTTPException: raises an HTTP error response (e.g. 401 Unauthorized)
@@ -57,10 +53,10 @@ class Principal:
     session_token: str | None   
     anonymous: bool             
 
+    # @proprety makes functions behave like var you can call it by principal.is_authenticated instead of principal.is_authenticated()
     @property
     def is_authenticated(self) -> bool:
         # True only when we have a verified partner_id (portal login or OTP-verified anonymous)
-        # anonymous users who haven't verified via OTP have partner_id = None → returns False
         return self.partner_id is not None
 
 
@@ -73,7 +69,7 @@ def verify_token(token: str) -> Principal:
         claims = jwt.decode(
             token,
             settings.jwt_secret,      # the shared secret used to verify the signature
-            algorithms=[settings.jwt_algorithm],  # e.g. ["HS256"]
+            algorithms=[settings.jwt_algorithm],  
             audience=settings.jwt_audience,       # must match the "aud" claim in the token
         )
     except JWTError as exc:
@@ -87,19 +83,18 @@ def verify_token(token: str) -> Principal:
 
     # token is valid — extract the identity claims and return a Principal object
     return Principal(
-        partner_id=claims.get("partner_id"),              # int or None
-        session_token=claims.get("session_token"),        # str or None
-        anonymous=bool(claims.get("anonymous", True)),    # default True if claim is missing
+        partner_id=claims.get("partner_id"),              
+        session_token=claims.get("session_token"),        
+        anonymous=bool(claims.get("anonymous", True)),    
     )
 
 
 # current_principal is a FastAPI dependency — it is declared with Depends() in route handlers
 # FastAPI automatically calls this function for every protected request and injects the result
 async def current_principal(
-    authorization: Annotated[str | None, Header()] = None,  # reads the "Authorization" HTTP header
+    authorization: str | None = Header(default=None),  # Injected from the request's "Authorization" header; expected format: "Bearer <JWT>"; None if missing
 ) -> Principal:
     # check that the header exists and starts with "Bearer " (case-insensitive)
-    # e.g. "Bearer eyJhbGciOiJIUzI1NiJ9...."
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

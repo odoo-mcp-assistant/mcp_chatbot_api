@@ -2,9 +2,6 @@
 
 import logging
 
-# Annotated: lets us combine a type hint with metadata (used below with Depends)
-from typing import Annotated
-
 # APIRouter: groups related endpoints under a common prefix/tags — mounted on the app in main.py
 # BackgroundTasks: schedules functions to run AFTER the HTTP response is sent to the client
 # Depends: injects the result of another function (here: current_principal) into the route
@@ -58,7 +55,7 @@ async def post_message(
     body: MessageRequest,   # request body parsed and validated against MessageRequest
     # Depends(current_principal) tells FastAPI to call current_principal first, verify the JWT,
     # and pass the resulting Principal into this function as `principal`
-    principal: Annotated[Principal, Depends(current_principal)],
+    principal: Principal = Depends(current_principal),
 ):
     # trim whitespace — if the message is empty after stripping, reject it
     user_message = body.message.strip()
@@ -84,7 +81,7 @@ async def post_message(
 # POST /mcp_chatbot/history — returns the conversation messages for the caller's open session
 @router.post("/history", response_model=HistoryResponse)
 async def get_history(
-    principal: Annotated[Principal, Depends(current_principal)],
+    principal: Principal = Depends(current_principal),
 ):
     # look up the session differently depending on who the caller is
     if principal.partner_id:
@@ -117,10 +114,8 @@ async def get_history(
 @router.post("/close", response_model=CloseResponse)
 async def close_session(
     body: CloseRequest,
-    principal: Annotated[Principal, Depends(current_principal)],
-    # BackgroundTasks is injected by FastAPI — tasks added to it run AFTER the response is sent,
-    # so the client doesn't wait for fact extraction (which makes an LLM call)
     background_tasks: BackgroundTasks,
+    principal: Principal = Depends(current_principal),
 ):
     # same lookup logic as /history — find the caller's open session
     if principal.partner_id:
@@ -172,7 +167,7 @@ async def close_session(
 # the widget calls this on load to show "Hi, <first_name>!" and to render the bot's display name
 @router.post("/info", response_model=InfoResponse)
 async def get_info(
-    principal: Annotated[Principal, Depends(current_principal)],
+    principal: Principal = Depends(current_principal),
 ):
     # cached Odoo settings (bot name, status) — no extra RPC call here
     cfg = get_odoo_config()
