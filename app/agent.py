@@ -26,6 +26,7 @@ import logging
 from .llm_client import get_async_openai
 from .mcp_client import get_mcp
 from .odoo_config import OdooConfig
+from .services import session as session_svc
 
 _logger = logging.getLogger(__name__)
 
@@ -105,6 +106,13 @@ async def process_message(
                 "Sorry, the request timed out. Please try again.",
                 verified_partner_id,
             )
+
+        if session_id is not None and not await session_svc.is_open(session_id):
+            _logger.info(
+                "agent: session %s closed mid-run, aborting at round %d",
+                session_id, round_num + 1,
+            )
+            raise session_svc.SessionClosed()
 
         response = await llm.chat.completions.create(
             model=cfg.llm.model_name,

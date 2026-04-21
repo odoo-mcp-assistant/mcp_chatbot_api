@@ -126,6 +126,12 @@ async def handle_chat(principal: Principal, user_message: str) -> tuple[str, boo
             authenticated_partner_id=effective_partner_id,
             session_id=session_id,
         )
+    except session_svc.SessionClosed:
+        _logger.info(
+            "chat: session %s closed during agent run — skipping persistence",
+            session_id,
+        )
+        return "", False
     except Exception as exc:
         _logger.exception("chat: agent pipeline error: %s", exc)
         reply = "Sorry, I encountered an error. Please try again."

@@ -110,6 +110,18 @@ async def close_session(session_id: int) -> None:
     await aodoo(_sync)
 
 
+class SessionClosed(Exception):
+    """Raised when the agent loop detects the session was closed mid-run."""
+
+
+async def is_open(session_id: int) -> bool:
+    def _sync() -> bool:
+        odoo = get_client()
+        rec = odoo.env["mcp.chatbot.session"].browse(session_id).read(["state"])
+        return bool(rec) and rec[0].get("state") == "open"
+    return await aodoo(_sync)
+
+
 async def save_rating(
     session_id: int, rating: str, feedback: str = "",
     partner_id: int | None = None,
