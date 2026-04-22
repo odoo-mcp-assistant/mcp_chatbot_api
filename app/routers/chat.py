@@ -48,7 +48,7 @@ _logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/mcp_chatbot", tags=["chatbot"])
 
 
-# POST /mcp_chatbot/message — the main chat endpoint
+# POST /mcp_chatbot/message — called by the widget when the user hits "Send"
 # response_model=MessageResponse makes FastAPI validate and serialize the return value
 @router.post("/message", response_model=MessageResponse)
 async def post_message(
@@ -78,7 +78,7 @@ async def post_message(
     return MessageResponse(reply=reply, summarized=did_summarize)
 
 
-# POST /mcp_chatbot/history — returns the conversation messages for the caller's open session
+# POST /mcp_chatbot/history — called by the widget on load to restore previous messages in the chat window
 @router.post("/history", response_model=HistoryResponse)
 async def get_history(
     principal: Principal = Depends(current_principal),
@@ -110,7 +110,7 @@ async def get_history(
     )
 
 
-# POST /mcp_chatbot/close — end the current session, optionally recording a rating + feedback
+# POST /mcp_chatbot/close — called by the widget when the user submits a rating or explicitly ends the conversation
 @router.post("/close", response_model=CloseResponse)
 async def close_session(
     body: CloseRequest,
@@ -163,8 +163,7 @@ async def close_session(
     return CloseResponse()
 
 
-# POST /mcp_chatbot/info — returns bot metadata + whether the caller is logged in
-# the widget calls this on load to show "Hi, <first_name>!" and to render the bot's display name
+# POST /mcp_chatbot/info — called by the widget on load to get the bot name and greet the user by first name
 @router.post("/info", response_model=InfoResponse)
 async def get_info(
     principal: Principal = Depends(current_principal),
@@ -182,7 +181,6 @@ async def get_info(
             odoo = get_client()
             partner = odoo.env["res.partner"].browse(principal.partner_id)
             name = partner.read(["name"])[0].get("name") or ""
-            # "Mohamed Dridi" → "Mohamed"  (simple split on the first space)
             return name.strip().split(" ")[0] if name else ""
         first_name = await aodoo(_read_name)
 
