@@ -4,30 +4,19 @@ odoorpc client wrapper.
 Design choices
 --------------
 - **One client per FastAPI worker process.** Authenticated once at
-  startup. Reused for every request. odoorpc's internal `requests.Session`
-  is used across threads — JSON-RPC calls are stateless with respect to
-  cookies (the session cookie identifies the logged-in user, not a
-  per-request transaction), so sharing is safe for typical read/write ops.
-- **Sync library, async app.** odoorpc is built on `requests`, which is
-  synchronous. Every call must be wrapped in `asyncio.to_thread()` so it
-  runs in the default thread pool instead of blocking the event loop.
-  The helper `aodoo()` below does that.
+  startup. Reused for every request.
 - **Fail loud at startup.** If the connection / login fails, the FastAPI
   app refuses to boot. Better to fail immediately than have every chat
   request error out at runtime.
 """
 
-import asyncio
 import logging
-from typing import Any, Callable, TypeVar
 
 import odoorpc
 
 from .config import get_settings
 
 _logger = logging.getLogger(__name__)
-
-T = TypeVar("T")
 
 # Module-level singleton — lives for the life of the worker process.
 _odoo: odoorpc.ODOO | None = None
@@ -73,19 +62,6 @@ def get_client() -> odoorpc.ODOO:
             "odoorpc client is not initialised — call connect() at startup"
         )
     return _odoo
-
-
-async def aodoo(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
-    """
-    Run a synchronous odoorpc call in a thread so it doesn't block the
-    FastAPI event loop.
-
-    Usage:
-        Session = odoo.env['mcp.chatbot.session']
-        session_id = await aodoo(Session.create, {'partner_id': 42})
-        vals = await aodoo(Session.browse(session_id).read, ['name', 'state'])
-    """
-    return await asyncio.to_thread(fn, *args, **kwargs)
 
 
 def disconnect() -> None:

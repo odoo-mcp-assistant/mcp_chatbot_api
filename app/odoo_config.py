@@ -93,7 +93,7 @@ def _resolve_model(odoo, model_id_raw: str) -> str:
 
 def load_odoo_config() -> OdooConfig:
     """Synchronous read from Odoo. Called at startup (before the event
-    loop gets busy) and from reload_odoo_config() via aodoo()."""
+    loop gets busy) and from the /reload_config endpoint."""
 
     global _cached          
     odoo = get_client()     # get the connected odoorpc client
@@ -139,7 +139,7 @@ def load_odoo_config() -> OdooConfig:
     )
     return cfg
 
-
+# we don't use @lru_cache because we need to refresh values if admin changes them 
 def get_odoo_config() -> OdooConfig:
     # crash loudly if called before load_odoo_config() ran at startup
     # this should never happen in normal operation — it means the lifespan hook didn't run

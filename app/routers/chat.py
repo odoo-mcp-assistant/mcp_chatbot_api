@@ -16,9 +16,8 @@ from ..auth import Principal, current_principal
 # handle_chat: the orchestrator that runs the agent loop, saves messages, and triggers summaries
 from ..chat_pipeline import handle_chat
 
-# aodoo: runs a synchronous odoorpc block in a thread pool so it doesn't block the event loop
 # get_client: returns the shared odoorpc connection (opened once at startup)
-from ..odoo_client import aodoo, get_client
+from ..odoo_client import get_client
 
 # get_odoo_config: returns the cached Odoo settings snapshot (bot name, status, LLM config, etc.)
 from ..odoo_config import get_odoo_config
@@ -64,9 +63,7 @@ async def post_message(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="message is required",
         )
-    # anonymous callers must carry a session_token so we can group their messages into one session
-    # (logged-in callers are identified by partner_id instead — no session_token needed)
-    if not principal.is_authenticated and not principal.session_token:
+    if not principal.session_token and not principal.partner_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="session_token is required for anonymous users",
@@ -175,18 +172,13 @@ async def get_info(
     first_name = ""
     if principal.partner_id:
         # logged-in user → fetch their partner name from Odoo, take the first word only
-        # inner function because odoorpc calls are synchronous — we wrap them in aodoo()
-        # so they run in a thread pool instead of blocking the asyncio event loop
-        def _read_name():
-            odoo = get_client()
-            partner = odoo.env["res.partner"].browse(principal.partner_id)
-            name = partner.read(["name"])[0].get("name") or ""
-            return name.strip().split(" ")[0] if name else ""
-        first_name = await aodoo(_read_name)
+        odoo = get_client()
+        partner = odoo.env["res.partner"].browse(principal.partner_id)
+        name = partner.read(["name"])[0].get("name") or ""
+        first_name = name.strip().split(" ")[0] if name else ""
 
     return InfoResponse(
         bot_name=cfg.bot_name,
         status=cfg.status,
-        is_authenticated=principal.is_authenticated,
         first_name=first_name,
     )

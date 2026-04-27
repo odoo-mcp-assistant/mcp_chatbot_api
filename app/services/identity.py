@@ -7,7 +7,7 @@ Three user types:
   3. Portal login OR OTP-verified with an existing portal account.
 """
 
-from ..odoo_client import aodoo, get_client
+from ..odoo_client import get_client
 
 
 async def build_identity_message(
@@ -16,10 +16,8 @@ async def build_identity_message(
 ) -> str:
     # Type 3 — portal / internal login via Odoo session (token-verified on our side)
     if authenticated_partner_id:
-        def _read() -> dict:
-            odoo = get_client()
-            return odoo.env["res.partner"].browse(authenticated_partner_id).read(["name"])[0]
-        vals = await aodoo(_read)
+        odoo = get_client()
+        vals = odoo.env["res.partner"].browse(authenticated_partner_id).read(["name"])[0]
         return (
             f"Current authenticated user (portal account): "
             f"name='{vals.get('name') or ''}'."
@@ -27,12 +25,10 @@ async def build_identity_message(
 
     # Type 2 or 3-edge — OTP-verified partner linked to the session
     if session_partner_id:
-        def _read() -> dict:
-            odoo = get_client()
-            return odoo.env["res.partner"].browse(session_partner_id).read(
-                ["name", "email", "user_ids"]
-            )[0]
-        vals = await aodoo(_read)
+        odoo = get_client()
+        vals = odoo.env["res.partner"].browse(session_partner_id).read(
+            ["name", "email", "user_ids"]
+        )[0]
         name = vals.get("name") or ""
         email = vals.get("email") or ""
         if vals.get("user_ids"):

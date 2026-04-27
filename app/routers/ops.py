@@ -7,7 +7,7 @@ import logging
 
 from fastapi import APIRouter
 
-from ..odoo_client import aodoo, get_client
+from ..odoo_client import get_client
 from ..mcp_client import get_mcp
 from ..odoo_config import get_odoo_config, load_odoo_config
 from ..config import get_settings
@@ -27,8 +27,8 @@ async def health():
 # verifies the Odoo connection is alive and authenticated
 @router.get("/health/odoo")
 async def health_odoo():
-    odoo = get_client()                                      # get the connected Odoo client singleton
-    user_name = await aodoo(lambda: odoo.env.user.name)      # ask Odoo for the logged-in user's name (in a thread)
+    odoo = get_client()
+    user_name = odoo.env.user.name
     return {
         "status": "ok",
         "odoo_version": odoo.version,       # e.g. "16.0"
@@ -71,6 +71,6 @@ async def health_config():
 # re-reads all mcp_chatbot.* keys from Odoo and refreshes the in-memory config snapshot
 @router.post("/reload_config")
 async def reload_config():
-    await aodoo(load_odoo_config)
+    load_odoo_config()
     _logger.info("reload_config: config reloaded from Odoo")
     return {"status": "ok"}

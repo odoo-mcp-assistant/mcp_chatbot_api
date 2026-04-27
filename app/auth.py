@@ -53,11 +53,6 @@ class Principal:
     session_token: str | None   
     anonymous: bool             
 
-    # @proprety makes functions behave like var you can call it by principal.is_authenticated instead of principal.is_authenticated()
-    @property
-    def is_authenticated(self) -> bool:
-        # True only when we have a verified partner_id (portal login or OTP-verified anonymous)
-        return self.partner_id is not None
 
 
 def verify_token(token: str) -> Principal:
@@ -80,7 +75,6 @@ def verify_token(token: str) -> Principal:
             detail="Invalid or expired token",
             headers={"WWW-Authenticate": "Bearer"},     # standard header telling the client to send a Bearer token
         ) from exc
-
     # token is valid — extract the identity claims and return a Principal object
     return Principal(
         partner_id=claims.get("partner_id"),              

@@ -95,7 +95,7 @@ async def handle_chat(principal: Principal, user_message: str) -> tuple[str, boo
     # summary (if any) with the new messages — not just append to it.
     # After this block, unsummarized_messages is cleared; the summary carries
     # that context from now on.
-    did_summarize = False
+    did_summarize = False # needed for the compacting bar in js  
     if _estimate_tokens(unsummarized_messages) >= cfg.summary_interval:
         summary_prefix: list[dict] = []
         if sess.get("history_summary"):
@@ -179,7 +179,7 @@ async def handle_chat(principal: Principal, user_message: str) -> tuple[str, boo
     # -------------------------------------------------------------------------
     # STEP 5 — Run the agentic loop.
     #
-    # process_message() drives the Claude tool-use loop. It returns the final
+    # process_message() drives the tool-use loop. It returns the final
     # text reply and, if an OTP verification happened during this turn, the
     # newly confirmed partner_id (otherwise None).
     # -------------------------------------------------------------------------
