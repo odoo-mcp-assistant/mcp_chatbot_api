@@ -119,7 +119,6 @@ async def process_message(
             messages=conversation,
             tools=tool_schemas,
             tool_choice="auto",
-            temperature=0.7,
         )
         message = response.choices[0].message
         reasoning = getattr(message, "reasoning_content", None) or getattr(message, "reasoning", None)
@@ -219,7 +218,6 @@ async def process_message(
         final = await llm.chat.completions.create(
             model=cfg.llm.model_name,
             messages=conversation,
-            temperature=0.7,
         )
         return _extract_reply(final.choices[0].message), verified_partner_id
     except Exception as exc:
