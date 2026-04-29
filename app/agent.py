@@ -343,10 +343,12 @@ async def process_message_stream(
             [tc["function"]["name"] for tc in tool_calls_acc.values()],
         )
 
-        # Reconstruct assistant message for conversation history.
-        # CRITICAL: Preserve reasoning_content for providers that require it
-        # (e.g. Moonshot with thinking enabled).  Also, content must be
-        # present (even if null) when tool_calls exist.
+        # Reconstruct assistant message for conversation history. Content must
+        # be present (even if null) when tool_calls exist. We deliberately do
+        # NOT replay reasoning_content: Moonshot documents it as a response
+        # field with no defined input-side semantics, and replaying it
+        # re-anchors speculative chain-of-thought as if it were fact, which
+        # amplifies confabulation across rounds.
         assistant_msg: dict = {
             "role": "assistant",
             "content": accumulated_content if accumulated_content else None,
@@ -362,8 +364,6 @@ async def process_message_stream(
                 for tc in tool_calls_acc.values()
             ],
         }
-        if accumulated_reasoning:
-            assistant_msg["reasoning_content"] = accumulated_reasoning
 
         conversation.append(assistant_msg)
 
