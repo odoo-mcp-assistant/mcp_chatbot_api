@@ -34,4 +34,5 @@ class CloseResponse(BaseModel):
 class InfoResponse(BaseModel):
     bot_name: str
     status: str
-first_name: str = ""
+    first_name: str = ""
+    is_authenticated: bool = False

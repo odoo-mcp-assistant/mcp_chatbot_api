@@ -180,4 +180,5 @@ async def get_info(
         bot_name=cfg.bot_name,
         status=cfg.status,
         first_name=first_name,
+        is_authenticated=bool(principal.partner_id),
     )
