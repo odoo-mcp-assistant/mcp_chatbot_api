@@ -14,7 +14,7 @@ def get_async_openai(
     api_key: str,
     base_url: str,
     timeout: float = 118.0,
-    max_retries: int = 2,
+    max_retries: int = 4,
 ) -> AsyncOpenAI:
     key = (api_key, base_url)
     if key not in _cache:
