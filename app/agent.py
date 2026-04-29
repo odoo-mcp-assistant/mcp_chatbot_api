@@ -50,6 +50,15 @@ def _extract_reply(msg) -> str:
     return getattr(msg, "content", None) or ""
 
 
+def _mcp_result_to_text(mcp_result) -> str:
+    # mcp_result.content is list[TextContent]; str() on it leaks Python repr
+    # (TextContent(type='text', text='...')) into the LLM context, which Kimi
+    # mis-parses and pattern-completes from training-data Odoo priors.
+    parts = getattr(mcp_result, "content", None) or []
+    texts = [getattr(p, "text", "") for p in parts if getattr(p, "text", None)]
+    return "\n".join(texts) if texts else "{}"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Non-streaming path (backward compatible)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -163,16 +172,11 @@ async def process_message(
 
             try:
                 mcp_result = await mcp.call_tool(name, arguments=args)
-                result_text = str(mcp_result.content)
+                result_text = _mcp_result_to_text(mcp_result)
 
                 if name == "verify_email_otp":
                     try:
-                        raw = (
-                            mcp_result.content[0].text
-                            if mcp_result.content
-                            else "{}"
-                        )
-                        parsed = json.loads(raw)
+                        parsed = json.loads(result_text)
                         if parsed.get("success") and parsed.get("partner_id"):
                             authenticated_partner_id = parsed["partner_id"]
                             verified_partner_id = parsed["partner_id"]
@@ -407,16 +411,11 @@ async def process_message_stream(
 
             try:
                 mcp_result = await mcp.call_tool(name, arguments=args)
-                result_text = str(mcp_result.content)
+                result_text = _mcp_result_to_text(mcp_result)
 
                 if name == "verify_email_otp":
                     try:
-                        raw = (
-                            mcp_result.content[0].text
-                            if mcp_result.content
-                            else "{}"
-                        )
-                        parsed = json.loads(raw)
+                        parsed = json.loads(result_text)
                         if parsed.get("success") and parsed.get("partner_id"):
                             authenticated_partner_id = parsed["partner_id"]
                             verified_partner_id = parsed["partner_id"]
