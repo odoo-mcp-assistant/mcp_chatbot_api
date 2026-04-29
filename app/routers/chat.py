@@ -165,13 +165,10 @@ async def close_session(
 async def get_info(
     principal: Principal = Depends(current_principal),
 ):
-    # cached Odoo settings (bot name, status) — no extra RPC call here
     cfg = get_odoo_config()
 
-    # default — anonymous users don't have a name to show
     first_name = ""
     if principal.partner_id:
-        # logged-in user → fetch their partner name from Odoo, take the first word only
         odoo = get_client()
         partner = odoo.env["res.partner"].browse(principal.partner_id)
         name = partner.read(["name"])[0].get("name") or ""
@@ -181,4 +178,5 @@ async def get_info(
         bot_name=cfg.bot_name,
         status=cfg.status,
         first_name=first_name,
+        is_authenticated=bool(principal.partner_id),
     )
