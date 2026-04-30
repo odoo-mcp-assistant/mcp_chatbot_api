@@ -23,6 +23,7 @@ import asyncio
 import json
 import logging
 
+from .intent_classifier import force_tool_call, needs_tool_call
 from .llm_client import get_async_openai
 from .mcp_client import get_mcp
 from .odoo_config import OdooConfig
@@ -105,6 +106,15 @@ async def process_message(
 
     verified_partner_id: int | None = None
 
+    # Tracks whether a tool has already been called in any previous round of
+    # this turn. Used to gate the intent classifier: empirically Kimi only
+    # "lies" (reasons about a tool but doesn't emit it) on the FIRST round.
+    # Subsequent rounds with no tool_calls are wrap-up/formatting — running
+    # the classifier there wastes work and risks false-positive forced
+    # retries. If late-round lies start showing up in the logs, remove the
+    # flag and let the classifier run on every no-tool-calls round again.
+    tool_called_in_turn = False
+
     for round_num in range(cfg.max_tool_rounds):
         task = asyncio.current_task()
         if task is not None and task.cancelled():
@@ -135,8 +145,56 @@ async def process_message(
         if message.tool_calls:
             _logger.info("agent: round %d tool_calls: %s", round_num + 1, [tc.function.name for tc in message.tool_calls])
 
+        # Fallback: model produced no tool_calls. The trained classifier
+        # decides — from the reasoning trace — whether a tool was intended.
+        # If yes, re-issue with a system-message nudge forcing the call.
+        # Skipped on rounds where a tool has already been called earlier in
+        # this turn (those are wrap-up rounds — the classifier would waste
+        # cycles and may false-positive on summarisation reasoning).
+        if (
+            not message.tool_calls
+            and reasoning
+            and not tool_called_in_turn
+            and await needs_tool_call(llm, reasoning)
+        ):
+            _logger.warning(
+                "agent: round %d classifier flagged dropped tool call — "
+                "re-issuing with force-call nudge",
+                round_num + 1,
+            )
+            try:
+                forced = await force_tool_call(
+                    llm, cfg.llm.model_name, conversation, tool_schemas,
+                )
+                forced_msg = forced.choices[0].message
+                if forced_msg.tool_calls:
+                    message = forced_msg
+                    reasoning = (
+                        getattr(message, "reasoning_content", None)
+                        or getattr(message, "reasoning", None)
+                    )
+                    _logger.info(
+                        "agent: round %d forced retry succeeded, tool_calls: %s",
+                        round_num + 1,
+                        [tc.function.name for tc in message.tool_calls],
+                    )
+                else:
+                    _logger.warning(
+                        "agent: round %d forced retry still produced no tool_calls",
+                        round_num + 1,
+                    )
+            except Exception as exc:
+                _logger.warning(
+                    "agent: round %d forced retry failed: %s",
+                    round_num + 1, exc,
+                )
+
         if not message.tool_calls:
             return _extract_reply(message), verified_partner_id
+
+        # Tools are about to execute — gate the classifier off for any
+        # subsequent rounds in this turn (they are wrap-up rounds).
+        tool_called_in_turn = True
 
         conversation.append(message)
 
