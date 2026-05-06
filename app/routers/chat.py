@@ -35,7 +35,7 @@ from ..schemas import (
 
 # service layer — each module wraps odoorpc calls for one Odoo model
 from ..services import (
-    fact_extractor as fact_extractor_svc,
+    fact as fact_svc,
     message as message_svc,
     session as session_svc,
 )
@@ -148,13 +148,15 @@ async def close_session(
     # mark the Odoo session as closed
     await session_svc.close_session(session_id)
 
-    # schedule fact extraction to run in the background AFTER the response is sent
-    # only makes sense for authenticated sessions — anonymous users have no partner to save facts to
+    # Fact extraction runs an LLM call (slow) and the user doesn't need its result,
+    # so we hand it to FastAPI's BackgroundTasks: add_task() only queues the call —
+    # it executes AFTER CloseResponse has been sent, so the widget unblocks immediately.
+    # Skipped for anonymous sessions — without a partner_id there's nowhere to save facts.
     session_partner_id = sess.get("partner_id")
     if session_partner_id:
         cfg = get_odoo_config()
         background_tasks.add_task(
-            fact_extractor_svc.extract_and_save,
+            fact_svc.extract_and_save,
             session_id=session_id,
             partner_id=session_partner_id,
             llm=cfg.fact_llm,

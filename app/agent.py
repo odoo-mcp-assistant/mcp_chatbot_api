@@ -15,8 +15,8 @@ singletons to warm up. Just a flat top-to-bottom function that:
   3. If the cap is reached, forces a plain-text wrap-up (with no tools
      advertised, because some LLM providers 400 on `tool_choice="none"`).
 
-Fact memory is handled post-session by `services.fact_extractor`; the
-agent no longer has a `remember_fact` tool.
+Fact memory is handled post-session by `services.fact.extract_and_save`;
+the agent no longer has a `remember_fact` tool.
 """
 
 import asyncio
