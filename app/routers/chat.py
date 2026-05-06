@@ -7,7 +7,7 @@ import logging
 # Depends: injects the result of another function (here: current_principal) into the route
 # HTTPException: raised to return an HTTP error response (e.g. 400, 401)
 # status: namespace of HTTP status code constants (status.HTTP_400_BAD_REQUEST = 400)
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response, status
 
 # Principal: dataclass describing the authenticated caller (partner_id / session_token / anonymous)
 # current_principal: FastAPI dependency that verifies the JWT and returns a Principal
@@ -75,11 +75,14 @@ async def post_message(
     return MessageResponse(reply=reply, summarized=did_summarize)
 
 
-# POST /mcp_chatbot/history — called by the widget on load to restore previous messages in the chat window
-@router.post("/history", response_model=HistoryResponse)
+# GET /mcp_chatbot/history — called by the widget on load to restore previous messages in the chat window
+@router.get("/history", response_model=HistoryResponse)
 async def get_history(
+    response: Response,
     principal: Principal = Depends(current_principal),
 ):
+    # per-user data — must never be cached by the browser or any intermediate proxy
+    response.headers["Cache-Control"] = "no-store"
     # look up the session differently depending on who the caller is
     if principal.partner_id:
         # logged-in user — find their most recent OPEN session
@@ -99,10 +102,10 @@ async def get_history(
         return HistoryResponse(status="closed", messages=[])
 
     # session is open → fetch its messages in chronological order and return them
-    msgs = await message_svc.list_by_session(sess["id"])
+    msgs = await message_svc.list_by_session(sess["id"]) # list of dictionaries 
     return HistoryResponse(
         status="open",
-        # unpack each {"role": ..., "content": ...} dict into a HistoryMessage pydantic model
+        # unpack each {"role": ..., "content": ...} dict into a HistoryMessage pydantic model using the **
         messages=[HistoryMessage(**m) for m in msgs],
     )
 
@@ -160,11 +163,14 @@ async def close_session(
     return CloseResponse()
 
 
-# POST /mcp_chatbot/info — called by the widget on load to get the bot name and greet the user by first name
-@router.post("/info", response_model=InfoResponse)
+# GET /mcp_chatbot/info — called by the widget on load to get the bot name and greet the user by first name
+@router.get("/info", response_model=InfoResponse)
 async def get_info(
+    response: Response,
     principal: Principal = Depends(current_principal),
 ):
+    # response varies per caller (first_name) — keep it out of any shared cache
+    response.headers["Cache-Control"] = "no-store"
     cfg = get_odoo_config()
 
     first_name = ""
@@ -180,3 +186,9 @@ async def get_info(
         first_name=first_name,
         is_authenticated=bool(principal.partner_id),
     )
+
+# fel fichier hedha aana 4 endpoints :
+#   POST /message  → fih body (le user message) + header (JWT)
+#   POST /close    → fih body (rating/feedback) + header (JWT)
+#   GET  /history  → header khw (JWT) — read-only, no body
+#   GET  /info     → header khw (JWT) — read-only, no body

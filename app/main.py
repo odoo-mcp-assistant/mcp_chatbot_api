@@ -88,7 +88,7 @@ app.add_middleware(
     allow_headers=["*"],                         # allow all headers (including Authorization)
 )
 
-# Register all chat routes: POST /mcp_chatbot/message, /history, /close, /info
+# Register all chat routes: POST /mcp_chatbot/message, POST /close, GET /history, GET /info
 app.include_router(chat_router.router)
 
 # Register all ops routes: GET /health, /health/odoo, /health/mcp, /health/config, POST /reload_config

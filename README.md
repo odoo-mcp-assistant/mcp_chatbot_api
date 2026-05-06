@@ -79,9 +79,9 @@ Chat (all require `Authorization: Bearer <jwt>`):
 | Method | Path                      | Purpose                                          |
 |--------|---------------------------|--------------------------------------------------|
 | POST   | `/mcp_chatbot/message`    | One user turn → assistant reply                  |
-| POST   | `/mcp_chatbot/history`    | Full message list for the caller's open session  |
+| GET    | `/mcp_chatbot/history`    | Full message list for the caller's open session  |
 | POST   | `/mcp_chatbot/close`      | Close session, optionally save rating + feedback |
-| POST   | `/mcp_chatbot/info`       | Bot name, status, auth state, first name         |
+| GET    | `/mcp_chatbot/info`       | Bot name, status, auth state, first name         |
 
 ## JWT claims
 
@@ -146,7 +146,7 @@ Then:
 
 ```bash
 TOKEN=<pasted>
-curl -s -X POST http://localhost:8020/mcp_chatbot/info \
+curl -s http://localhost:8020/mcp_chatbot/info \
   -H "Authorization: Bearer $TOKEN" | jq
 curl -s -X POST http://localhost:8020/mcp_chatbot/message \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
