@@ -12,17 +12,19 @@ FastAPI is the **verifier** — every protected endpoint depends on
 describing who the caller is. Invalid / expired / wrong-audience tokens
 produce a 401.
 
-Token claims
-------------
+Token claims (read by this verifier)
+------------------------------------
     {
       "sub":            "<partner_id>" | "anon:<session_token>",
       "partner_id":     int | null,
       "session_token":  str | null,
-      "anonymous":      bool,
       "exp":            <unix-ts>,
       "iat":            <unix-ts>,
       "aud":            "mcp-chatbot-api"
     }
+
+The token may carry additional claims (e.g. "anonymous"); they are
+ignored — anonymity is derived as ``partner_id is None``.
 """
 
 import logging
@@ -49,9 +51,8 @@ _logger = logging.getLogger(__name__)
 # frozen=True means its fields cannot be changed after creation
 @dataclass(frozen=True)
 class Principal:
-    partner_id: int | None      
-    session_token: str | None   
-    anonymous: bool             
+    partner_id: int | None
+    session_token: str | None
 
 
 
@@ -75,11 +76,12 @@ def verify_token(token: str) -> Principal:
             detail="Invalid or expired token",
             headers={"WWW-Authenticate": "Bearer"},     # standard header telling the client to send a Bearer token
         ) from exc
-    # token is valid — extract the identity claims and return a Principal object
+    # token is valid — extract the identity claims and return a Principal object.
+    # Note: the JWT may still carry an "anonymous" claim from older Odoo builds;
+    # we ignore it here. "Anonymous" is now derived as `partner_id is None`.
     return Principal(
-        partner_id=claims.get("partner_id"),              
-        session_token=claims.get("session_token"),        
-        anonymous=bool(claims.get("anonymous", True)),    
+        partner_id=claims.get("partner_id"),
+        session_token=claims.get("session_token"),
     )
 
 
