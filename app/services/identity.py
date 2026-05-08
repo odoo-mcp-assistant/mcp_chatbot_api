@@ -45,3 +45,11 @@ async def build_identity_message(
 
     # Type 1 — fully anonymous
     return "Current user: not logged in (anonymous visitor)."
+
+# Autheticated partner id for the users who have portal accounts so their partner id is passed with the jwt in the claims as partner id then in the handle chat function
+# they are passed with principal.partner_id.
+
+# For the users who do not have accounts and are verified we wil find their partner id appende to the session after OTP verification that's why 
+# in the handle chat function we pass them using sess.get("partner_id") since odoo doesn't send their partner id in the jwt 
+
+# For the anonymous users they don't have neither one of the last partner ids so if the two params are empty in this function it returns that the user is anonymous 
