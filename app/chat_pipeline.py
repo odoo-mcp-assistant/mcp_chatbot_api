@@ -157,7 +157,7 @@ async def handle_chat(principal: Principal, user_message: str) -> tuple[str, boo
     # Facts are stored per-partner and injected as a system block so the agent
     # can personalise answers without re-discovering them via tool calls.
     if effective_partner_id:
-        facts = await fact_svc.list_for_partner(effective_partner_id)
+        facts = await fact_svc.list_facts_for_partner(effective_partner_id)
         if facts:
             fact_lines = [
                 f"- [{(f.get('category') or 'general')}] {f.get('fact_text') or ''}"
