@@ -105,7 +105,7 @@ async def get_history(
     msgs = await message_svc.list_by_session(sess["id"]) # list of dictionaries 
     return HistoryResponse(
         status="open",
-        # unpack each {"role": ..., "content": ...} dict into a HistoryMessage pydantic model using the **
+        # unpack each {"role": ..., "content": ...} dict into a HistoryMessage pydantic model using the ** instaed of passing them seperatly role:.... content:......
         messages=[HistoryMessage(**m) for m in msgs],
     )
 

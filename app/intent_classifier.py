@@ -59,14 +59,14 @@ async def needs_tool_call(llm: Any, reasoning: str | None) -> bool:
         return False
     try:
         resp = await llm.chat.completions.create(
-            model="moonshot-v1-8k",
+            model="kimi-k2.5",
             messages=[
                 {"role": "system", "content": _CLASSIFY_SYSTEM},
                 {"role": "user", "content": _CLASSIFY_USER_TEMPLATE.format(
                     reasoning=reasoning.strip(),
                 )},
             ],
-            temperature=0,
+            temperature=1,
             max_tokens=4,
         )
         verdict = (resp.choices[0].message.content or "").strip().lower()

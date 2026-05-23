@@ -50,9 +50,8 @@ async def handle_chat(principal: Principal, user_message: str) -> tuple[str, boo
 
     session_id = sess["id"]
 
-    # An anonymous session can become "linked" to a partner mid-session after
-    # the user verifies their email via OTP. In that case sess["partner_id"] is
-    # set even though principal.partner_id is None, so we merge both sources.
+    # An anonymous session can become "linked" to a partner mid-session after the user verifies their email via OTP. In that case sess["partner_id"] is set even though principal.partner_id is None, so we merge both sources.
+    # this is used later to tell whether extract facts for this user or treat it as anonymous 
     effective_partner_id = principal.partner_id or sess.get("partner_id")
 
     # -------------------------------------------------------------------------
@@ -189,7 +188,7 @@ async def handle_chat(principal: Principal, user_message: str) -> tuple[str, boo
             history=conversation_history,
             cfg=cfg,
             authenticated_partner_id=effective_partner_id,
-            session_id=session_id,
+            session_id=session_id, #for health check of the session 
         )
     except session_svc.SessionClosed:
         _logger.info(

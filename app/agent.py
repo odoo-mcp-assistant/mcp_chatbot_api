@@ -39,6 +39,7 @@ AUTH_REQUIRED_TOOLS = {
     "create_order",
     "confirm_order",
     "cancel_order",
+    "update_order",
     "get_order_details",
     "get_my_profile",
     "get_invoices",
@@ -188,7 +189,7 @@ async def process_message(
                     "agent: round %d forced retry failed: %s",
                     round_num + 1, exc,
                 )
-
+        # if the message has no tool_calls then return the llm's response 
         if not message.tool_calls:
             return _extract_reply(message), verified_partner_id
 
@@ -204,16 +205,39 @@ async def process_message(
                 args = json.loads(tool_call.function.arguments or "{}")
             except json.JSONDecodeError:
                 args = {}
+            # Tools accept argments as dict if the llm doesn't emmit a dict as args we retunr empty dict  
             if not isinstance(args, dict):
                 args = {}
 
-            # verify_email_otp: session_id so the MCP server can link
-            # the newly-verified partner onto the correct session row.
+            # verify_email_otp: session_id so the MCP server can link the newly-verified partner onto the correct session row and modify the last_activity field.
             if name == "verify_email_otp":
                 args["session_id"] = session_id
 
-            # Auth gate: if the tool needs a verified partner, either inject
-            # it or return the auth-flow suggestion back to the LLM.
+            # Ban the email-verification flow for already-authenticated users:
+            # send_verification_email exists only to verify anonymous visitors.
+            # If we already have a partner_id, short-circuit it so no code is
+            # ever sent and tell the LLM the user is already verified.
+            if name == "send_verification_email" and authenticated_partner_id:
+                _logger.info(
+                    "agent: round %d 'send_verification_email' blocked (already authenticated, partner_id=%s)",
+                    round_num + 1, authenticated_partner_id,
+                )
+                conversation.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "name": name,
+                    "content": json.dumps({
+                        "error": "Already authenticated",
+                        "suggestion": (
+                            "The user is already signed in and verified. "
+                            "Do NOT ask for their email or send a verification code. "
+                            "Proceed with the original request directly."
+                        ),
+                    }),
+                })
+                continue
+
+            # Auth gate: if the tool needs a verified partner, either inject it or return the auth-flow suggestion back to the LLM.
             if name in AUTH_REQUIRED_TOOLS:
                 if not authenticated_partner_id:
                     _logger.info(
@@ -229,7 +253,8 @@ async def process_message(
                             "suggestion": AUTH_REQUIRED_SUGGESTION,
                         }),
                     })
-                    continue
+                    continue # skips the rest of the loop and restarts the current one with the injected instructions  to not block other tool calls that might be idependant 
+                # if the user is authenticated then inject the partner_id in the args 
                 args["partner_id"] = authenticated_partner_id
 
             _logger.info(
@@ -244,8 +269,8 @@ async def process_message(
                     try:
                         parsed = json.loads(result_text)
                         if parsed.get("success") and parsed.get("partner_id"):
-                            authenticated_partner_id = parsed["partner_id"]
-                            verified_partner_id = parsed["partner_id"]
+                            authenticated_partner_id = parsed["partner_id"] # needed if the verification is done mid session for later tool calls existing in AUTH_REQUIRED_TOOLS
+                            verified_partner_id = parsed["partner_id"] # the function returns it and it's used as signal that the user became verified in this section 
                     except Exception as exc:
                         _logger.debug(
                             "agent: verify_email_otp parse failed: %s", exc
