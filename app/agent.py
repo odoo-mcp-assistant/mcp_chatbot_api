@@ -19,7 +19,6 @@ Fact memory is handled post-session by `services.fact.extract_and_save`;
 the agent no longer has a `remember_fact` tool.
 """
 
-import asyncio
 import json
 import logging
 
@@ -117,13 +116,6 @@ async def process_message(
     tool_called_in_turn = False
 
     for round_num in range(cfg.max_tool_rounds):
-        task = asyncio.current_task()
-        if task is not None and task.cancelled():
-            return (
-                "Sorry, the request timed out. Please try again.",
-                verified_partner_id,
-            )
-
         if session_id is not None and not await session_svc.is_open(session_id):
             _logger.info(
                 "agent: session %s closed mid-run, aborting at round %d",
