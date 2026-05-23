@@ -7,7 +7,7 @@ import logging
 # Depends: injects the result of another function (here: current_principal) into the route
 # HTTPException: raised to return an HTTP error response (e.g. 400, 401)
 # status: namespace of HTTP status code constants (status.HTTP_400_BAD_REQUEST = 400)
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 
 # Principal: dataclass describing the authenticated caller (partner_id / session_token / anonymous)
 # current_principal: FastAPI dependency that verifies the JWT and returns a Principal
@@ -78,11 +78,8 @@ async def post_message(
 # GET /mcp_chatbot/history — called by the widget on load to restore previous messages in the chat window
 @router.get("/history", response_model=HistoryResponse)
 async def get_history(
-    response: Response,
     principal: Principal = Depends(current_principal),
 ):
-    # per-user data — must never be cached by the browser or any intermediate proxy
-    response.headers["Cache-Control"] = "no-store"
     # look up the session differently depending on who the caller is
     if principal.partner_id:
         # logged-in user — find their most recent OPEN session
@@ -168,11 +165,8 @@ async def close_session(
 # GET /mcp_chatbot/info — called by the widget on load to get the bot name and greet the user by first name
 @router.get("/info", response_model=InfoResponse)
 async def get_info(
-    response: Response,
     principal: Principal = Depends(current_principal),
 ):
-    # response varies per caller (first_name) — keep it out of any shared cache
-    response.headers["Cache-Control"] = "no-store"
     cfg = get_odoo_config()
 
     first_name = ""
