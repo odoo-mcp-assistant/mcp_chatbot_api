@@ -20,7 +20,7 @@ import logging
 from ..llm_client import get_async_openai
 from ..odoo_client import get_client
 from ..odoo_config import LLMConfig
-from . import message as message_svc
+from . import session as session_svc
 
 _logger = logging.getLogger(__name__)
 
@@ -84,7 +84,7 @@ async def extract_and_save(
     # Pull every message from the closed session, then keep only what the user
     # actually said. Assistant replies are noise for fact extraction — we only
     # want first-person statements that could be durable facts.
-    all_msgs = await message_svc.list_by_session(session_id)
+    all_msgs = await session_svc.get_conversation_history(session_id)
     user_messages = [
         m["content"] for m in all_msgs
         if m.get("role") == "user" and m.get("content")

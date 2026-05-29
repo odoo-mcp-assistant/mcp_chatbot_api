@@ -36,7 +36,6 @@ from ..schemas import (
 # service layer — each module wraps odoorpc calls for one Odoo model
 from ..services import (
     fact as fact_svc,
-    message as message_svc,
     session as session_svc,
 )
 
@@ -99,7 +98,7 @@ async def get_history(
         return HistoryResponse(status="closed", messages=[])
 
     # session is open → fetch its messages in chronological order and return them
-    msgs = await message_svc.list_by_session(sess["id"]) # list of dictionaries 
+    msgs = await session_svc.get_conversation_history(sess["id"]) # list of dictionaries 
     return HistoryResponse(
         status="open",
         # unpack each {"role": ..., "content": ...} dict into a HistoryMessage pydantic model using the ** instaed of passing them seperatly role:.... content:......
