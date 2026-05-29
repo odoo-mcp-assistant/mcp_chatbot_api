@@ -148,7 +148,7 @@ async def process_message(
             not message.tool_calls
             and reasoning
             and not tool_called_in_turn
-            and await needs_tool_call(llm, reasoning)
+            and await needs_tool_call(llm, reasoning, tool_schemas)
         ):
             _logger.warning(
                 "agent: round %d classifier flagged dropped tool call — "

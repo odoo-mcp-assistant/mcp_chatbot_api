@@ -39,19 +39,56 @@ _CLASSIFY_SYSTEM = (
 )
 
 _CLASSIFY_USER_TEMPLATE = (
-    "An AI assistant produced the internal reasoning below but did NOT emit "
-    "any tool call. Did this reasoning indicate that the assistant intended "
-    "to call a tool (search products, fetch orders, retrieve invoices, look "
-    "up a profile, paginate, create/confirm/cancel an order, send a "
-    "verification email, get a policy document, etc.) which it then failed "
-    "to actually invoke?\n\n"
+    "An AI assistant has exactly these tools available:\n{tools}\n\n"
+    "The assistant produced the internal reasoning below but did NOT emit any "
+    "tool call — it answered in plain text instead. Based ONLY on the tools "
+    "listed above, did this reasoning indicate that the assistant intended to "
+    "use one of those tools (it named one, or described an action that maps to "
+    "one — e.g. confirming an order, searching products, fetching orders or "
+    "invoices, looking up a profile, paginating, sending a verification email) "
+    "but then failed to actually invoke it?\n\n"
+    "Answer yes only if a listed tool should have been called. Answer no if the "
+    "reasoning was just formatting a reply, asking the user a question, or "
+    "otherwise did not require any of the tools above.\n\n"
     "Reasoning:\n{reasoning}\n\n"
     "Answer (yes or no):"
 )
 
+# Used when the caller passes no tool schemas — keeps the classifier working
+# (with a generic example list) rather than rendering an empty tools block.
+_GENERIC_TOOLS = (
+    "- (tool list unavailable; common tools: search products, fetch orders, "
+    "retrieve invoices, look up a profile, confirm/cancel an order, send a "
+    "verification email, get a policy document)"
+)
 
-async def needs_tool_call(llm: Any, reasoning: str | None) -> bool:
+
+def _format_tools(tool_schemas: list[dict] | None) -> str:
+    """Render the OpenAI-style tool schemas as a `- name: description` list
+    for the classifier prompt. Falls back to a generic hint if none given."""
+    lines: list[str] = []
+    for s in tool_schemas or []:
+        fn = s.get("function", {})
+        name = fn.get("name")
+        if not name:
+            continue
+        desc = (fn.get("description") or "").strip()
+        first_line = desc.splitlines()[0].strip() if desc else ""
+        lines.append(f"- {name}: {first_line}" if first_line else f"- {name}")
+    return "\n".join(lines) if lines else _GENERIC_TOOLS
+
+
+async def needs_tool_call(
+    llm: Any,
+    reasoning: str | None,
+    tool_schemas: list[dict] | None = None,
+) -> bool:
     """Ask the LLM whether the given reasoning trace implied a tool call.
+
+    `tool_schemas` (the same OpenAI-style list the agent advertises) is shown
+    to the classifier so it can judge against the REAL tool catalog instead of
+    a generic example list — this is what lets it tell a dropped `confirm_order`
+    from a plain formatting reply.
 
     Returns False on empty input or any error — the conservative choice
     (we'd rather skip a fallback retry than burn tokens on a bad call)."""
@@ -59,10 +96,11 @@ async def needs_tool_call(llm: Any, reasoning: str | None) -> bool:
         return False
     try:
         resp = await llm.chat.completions.create(
-            model="kimi-k2.5",
+            model="moonshot-v1-8k",
             messages=[
                 {"role": "system", "content": _CLASSIFY_SYSTEM},
                 {"role": "user", "content": _CLASSIFY_USER_TEMPLATE.format(
+                    tools=_format_tools(tool_schemas),
                     reasoning=reasoning.strip(),
                 )},
             ],
