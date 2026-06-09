@@ -291,3 +291,121 @@ async def save_rating(
 async def close_session(session_id: int) -> None:
     odoo = get_client()
     odoo.env["mcp.chatbot.session"].browse(session_id).action_close()
+
+
+
+
+# ======================================================================
+# CONVERSATIONS SIDEBAR — called from routers/chat.py
+# (read-only browsing of a logged-in user's past conversations)
+# ======================================================================
+
+# Fields we read for each row of the sidebar. `message_count` and
+# `session_rating_text` are computed Odoo fields — reading them triggers
+# the compute, which is fine for the modest per-user session counts here.
+CONVERSATION_LIST_FIELDS = [
+    "id", "create_date", "state", "message_count", "session_rating_text",
+]
+
+# Longest preview title we keep; the rest is trimmed with an ellipsis.
+_TITLE_MAX_LEN = 60
+
+
+def _iso_utc(value: Any) -> str:
+    """Turn odoorpc's naive UTC datetime string into an ISO-8601 'Z' string.
+
+    odoorpc hands datetimes back as "YYYY-MM-DD HH:MM:SS" in UTC. Appending
+    'Z' (and swapping the space for 'T') lets the browser parse it as UTC and
+    render it in the visitor's local timezone.
+    """
+    if not value:
+        return ""
+    return str(value).replace(" ", "T") + "Z"
+
+
+def _first_user_message_previews(session_ids: list[int]) -> dict[int, str]:
+    """Map session_id → trimmed text of that session's FIRST user message.
+
+    One batched search/read across all the caller's sessions (instead of one
+    query per session) so the sidebar costs two round trips total. Sessions
+    with no user message yet are simply absent from the map.
+    """
+    odoo = get_client()
+    Msg = odoo.env["mcp.chatbot.message"]
+    mids = Msg.search(
+        [("session_id", "in", session_ids), ("role", "=", "user")],
+        order="create_date asc, id asc",
+    )
+    if not mids:
+        return {}
+
+    previews: dict[int, str] = {}
+    for m in Msg.browse(mids).read(["session_id", "content"]):
+        sid = m["session_id"]
+        # Many2one comes back as [id, name]; collapse to the id.
+        if isinstance(sid, (list, tuple)) and sid:
+            sid = sid[0]
+        # Keep only the earliest user message per session (first one wins
+        # because the search is ordered chronologically).
+        if sid in previews:
+            continue
+        text = (m.get("content") or "").strip()
+        if not text:
+            continue
+        if len(text) > _TITLE_MAX_LEN:
+            text = text[:_TITLE_MAX_LEN].rstrip() + "…"
+        previews[sid] = text
+    return previews
+
+
+# Lists every session owned by this partner, newest first. Used by
+# GET /mcp_chatbot/conversations to populate the sidebar.
+async def list_by_partner(partner_id: int) -> list[dict[str, Any]]:
+    odoo = get_client()
+    Session = odoo.env["mcp.chatbot.session"]
+    ids = Session.search(
+        [("partner_id", "=", partner_id)],
+        order="create_date desc",
+    )
+    if not ids:
+        return []
+
+    rows = Session.browse(ids).read(CONVERSATION_LIST_FIELDS)
+    previews = _first_user_message_previews(ids)
+
+    conversations: list[dict[str, Any]] = []
+    for row in rows:
+        sid = row["id"]
+        conversations.append({
+            "id": sid,
+            "title": previews.get(sid) or "New conversation",
+            "created_at": _iso_utc(row.get("create_date")),
+            "message_count": row.get("message_count") or 0,
+            "state": row.get("state") or "open",
+            "rating": row.get("session_rating_text") or "none",
+        })
+    return conversations
+
+
+# Returns the chronological messages of one session, but ONLY if that session
+# belongs to `partner_id`. Returns None when the session does not exist or is
+# owned by someone else — the router maps that to a 404 so a logged-in user
+# can never read another partner's conversation by guessing ids.
+async def get_owned_history(
+    session_id: int, partner_id: int,
+) -> tuple[str, list[dict[str, str]]] | None:
+    odoo = get_client()
+    Session = odoo.env["mcp.chatbot.session"]
+    rec = Session.browse(session_id).read(["partner_id", "state"])
+    if not rec:
+        return None
+
+    owner = rec[0].get("partner_id")
+    if isinstance(owner, (list, tuple)) and owner:
+        owner = owner[0]
+    if owner != partner_id:
+        return None
+
+    state = rec[0].get("state") or "closed"
+    messages = await get_conversation_history(session_id)
+    return state, messages

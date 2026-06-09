@@ -26,6 +26,9 @@ from ..odoo_config import get_odoo_config
 from ..schemas import (
     CloseRequest,
     CloseResponse,
+    ConversationDetailResponse,
+    ConversationListResponse,
+    ConversationSummary,
     HistoryMessage,
     HistoryResponse,
     InfoResponse,
@@ -181,6 +184,52 @@ async def get_info(
         first_name=first_name,
         is_authenticated=bool(principal.partner_id),
     )
+
+# GET /mcp_chatbot/conversations — sidebar list of the caller's past conversations.
+# Authenticated users only: anonymous visitors have no durable, browsable history
+# (their identity is a throwaway sessionStorage token), so we reject them with 403.
+@router.get("/conversations", response_model=ConversationListResponse)
+async def list_conversations(
+    principal: Principal = Depends(current_principal),
+):
+    if not principal.partner_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Conversation history is available to logged-in users only",
+        )
+    convos = await session_svc.list_by_partner(principal.partner_id)
+    return ConversationListResponse(
+        conversations=[ConversationSummary(**c) for c in convos],
+    )
+
+
+# GET /mcp_chatbot/conversations/{session_id} — read one past conversation.
+# The service enforces ownership (the session must belong to this partner);
+# a missing or someone-else's session both surface as 404 so ids can't be probed.
+@router.get("/conversations/{session_id}", response_model=ConversationDetailResponse)
+async def get_conversation(
+    session_id: int,
+    principal: Principal = Depends(current_principal),
+):
+    if not principal.partner_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Conversation history is available to logged-in users only",
+        )
+    result = await session_svc.get_owned_history(session_id, principal.partner_id)
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Conversation not found",
+        )
+    state, msgs = result
+    return ConversationDetailResponse(
+        id=session_id,
+        status="ok",
+        state=state,
+        messages=[HistoryMessage(**m) for m in msgs],
+    )
+
 
 # fel fichier hedha aana 4 endpoints :
 #   POST /message  → fih body (le user message) + header (JWT)
