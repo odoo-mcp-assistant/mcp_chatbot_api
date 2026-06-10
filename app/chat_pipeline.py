@@ -10,6 +10,7 @@ Ported from `mcp_chatbot/controllers/chatbot_controller.py::receive_message`.
 """
 
 import logging
+from collections.abc import AsyncGenerator
 
 from .agent import process_message
 from .auth import Principal
@@ -30,8 +31,28 @@ def _estimate_tokens(messages: list[dict]) -> int:
     return sum(len((m.get("content") or "")) // 4 for m in messages)
 
 
-async def handle_chat(principal: Principal, user_message: str) -> tuple[str, bool]:
-    """Process one user turn. Returns (reply, did_summarize_this_turn)."""
+def _join_turn(steps: list[str], reply: str) -> str:
+    """Combine a turn's interim narration steps and final reply into a single
+    assistant message, separated as markdown paragraphs — so the whole turn is
+    stored as one row and reloads as one continuous message."""
+    parts = [p for p in (steps + [reply]) if p and p.strip()]
+    return "\n\n".join(parts)
+
+
+async def handle_chat(
+    principal: Principal, user_message: str
+) -> AsyncGenerator[dict, None]:
+    """Process one user turn as a stream of events for the SSE endpoint.
+
+    Yields, in order:
+      - {"type": "interim", "content": str}              narration steps
+      - {"type": "final", "content": str, "summarized": bool}   final reply
+      - {"type": "closed"}                               session closed mid-run
+      - {"type": "error", "content": str}                pipeline failure
+
+    The whole assistant turn (interim steps + final reply) is persisted to Odoo
+    before the terminating event is yielded.
+    """
     cfg = get_odoo_config()
 
     # -------------------------------------------------------------------------
@@ -182,41 +203,65 @@ async def handle_chat(principal: Principal, user_message: str) -> tuple[str, boo
     # text reply and, if an OTP verification happened during this turn, the
     # newly confirmed partner_id (otherwise None).
     # -------------------------------------------------------------------------
+    # interim narration steps are accumulated as they stream so they can be
+    # persisted (in order) ahead of the final reply once the turn completes.
+    interim_steps: list[str] = []
     try:
-        reply, verified_partner_id = await process_message(
+        async for event in process_message(
             user_message=user_message,
             history=conversation_history,
             cfg=cfg,
             authenticated_partner_id=effective_partner_id,
-            session_id=session_id, #for health check of the session 
-        )
+            session_id=session_id, #for health check of the session
+        ):
+            if event.get("type") == "interim":
+                # Forward narration to the client the moment the agent emits it.
+                interim_steps.append(event["content"])
+                yield {"type": "interim", "content": event["content"]}
+
+            elif event.get("type") == "final":
+                reply = event.get("content") or ""
+                verified_partner_id = event.get("verified_partner_id")
+
+                # ---------------------------------------------------------
+                # Persist the whole assistant turn BEFORE emitting the final
+                # event, so a client disconnect right after it can't lose the
+                # saved messages. Interim steps + reply are stored as ONE
+                # assistant message, so a page reload shows the single continuous
+                # message the user saw live.
+                # ---------------------------------------------------------
+                await message_svc.create(
+                    session_id, "assistant", _join_turn(interim_steps, reply)
+                )
+
+                # Update last_activity. Skipped when verify_email_otp just ran
+                # this turn: that MCP tool already touched the session row, and
+                # writing it again in the same request causes a DB
+                # serialization conflict.
+                if not verified_partner_id:
+                    try:
+                        await session_svc.touch_activity(session_id)
+                    except Exception as exc:
+                        _logger.warning("chat: touch_activity failed: %s", exc)
+
+                yield {"type": "final", "content": reply, "summarized": did_summarize}
+
     except session_svc.SessionClosed:
         _logger.info(
             "chat: session %s closed during agent run — skipping persistence",
             session_id,
         )
-        return "", False
+        yield {"type": "closed"}
+
     except Exception as exc:
         _logger.exception("chat: agent pipeline error: %s", exc)
         reply = "Sorry, I encountered an error. Please try again."
-        verified_partner_id = None
-
-    # -------------------------------------------------------------------------
-    # STEP 6 — Persist the assistant reply to Odoo.
-    # -------------------------------------------------------------------------
-    await message_svc.create(session_id, "assistant", reply)
-
-    # -------------------------------------------------------------------------
-    # STEP 7 — Update last_activity on the session.
-    #
-    # Skipped when verify_email_otp just ran in this same turn: that MCP tool
-    # already touched the session row, and writing it again in the same
-    # request causes a DB serialization conflict.
-    # -------------------------------------------------------------------------
-    if not verified_partner_id:
+        # Persist whatever the user already saw (interim steps) plus the error
+        # reply as one message, so the turn isn't lost on reload.
         try:
-            await session_svc.touch_activity(session_id)
-        except Exception as exc:
-            _logger.warning("chat: touch_activity failed: %s", exc)
-
-    return reply, did_summarize
+            await message_svc.create(
+                session_id, "assistant", _join_turn(interim_steps, reply)
+            )
+        except Exception as persist_exc:
+            _logger.warning("chat: error-path persistence failed: %s", persist_exc)
+        yield {"type": "error", "content": reply}

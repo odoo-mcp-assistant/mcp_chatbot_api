@@ -1,6 +1,11 @@
 """Chat + history + close + info endpoints. All require a JWT."""
 
+import json
 import logging
+
+# StreamingResponse: streams the chat reply to the browser as Server-Sent
+# Events (text/event-stream) so interim narration appears as the agent runs.
+from fastapi.responses import StreamingResponse
 
 # APIRouter: groups related endpoints under a common prefix/tags — mounted on the app in main.py
 # BackgroundTasks: schedules functions to run AFTER the HTTP response is sent to the client
@@ -49,9 +54,10 @@ _logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/mcp_chatbot", tags=["chatbot"])
 
 
-# POST /mcp_chatbot/message — called by the widget when the user hits "Send"
-# response_model=MessageResponse makes FastAPI validate and serialize the return value
-@router.post("/message", response_model=MessageResponse)
+# POST /mcp_chatbot/message — called by the widget when the user hits "Send".
+# Returns a Server-Sent Events stream (text/event-stream): the agent's interim
+# narration is pushed to the browser as it happens, then the final reply.
+@router.post("/message")
 async def post_message(
     body: MessageRequest,   # request body parsed and validated against MessageRequest
     # Depends(current_principal) tells FastAPI to call current_principal first, verify the JWT,
@@ -71,10 +77,34 @@ async def post_message(
             detail="session_token is required for anonymous users",
         )
 
-    # delegate the real work to the pipeline — it runs the agent loop, persists messages,
-    # and returns (reply_text, did_summarize) where did_summarize flags that history was compacted
-    reply, did_summarize = await handle_chat(principal, user_message)
-    return MessageResponse(reply=reply, summarized=did_summarize)
+    # handle_chat runs the agent loop, persists messages, and yields event dicts
+    # ({"type": "interim"|"final"|"closed"|"error", ...}). We serialise each as
+    # one SSE frame: `data: <json>\n\n`. The widget parses these and renders
+    # interim bubbles + a "thinking" beat between them before the final reply.
+    async def event_stream():
+        # handle_chat catches agent-loop failures itself, but setup steps before
+        # the loop (session resolution, persisting the user message) run here
+        # mid-stream — after the 200 headers are sent. Guard them so any failure
+        # still reaches the client as a terminal `error` frame rather than a
+        # dropped connection that would leave the widget's composer locked.
+        try:
+            async for event in handle_chat(principal, user_message):
+                yield f"data: {json.dumps(event)}\n\n"
+        except Exception as exc:
+            _logger.exception("message stream failed: %s", exc)
+            yield "data: " + json.dumps({
+                "type": "error",
+                "content": "Sorry, I encountered an error. Please try again.",
+            }) + "\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # tell nginx/proxies not to buffer the stream
+        },
+    )
 
 
 # GET /mcp_chatbot/history — called by the widget on load to restore previous messages in the chat window

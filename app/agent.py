@@ -21,6 +21,7 @@ the agent no longer has a `remember_fact` tool.
 
 import json
 import logging
+from collections.abc import AsyncGenerator
 
 from .intent_classifier import force_tool_call, needs_tool_call
 from .llm_client import get_async_openai
@@ -88,13 +89,22 @@ async def process_message(
     cfg: OdooConfig,
     authenticated_partner_id: int | None = None,
     session_id: int | None = None,
-) -> tuple[str, int | None]:
+) -> AsyncGenerator[dict, None]:
     """
-    Run the agentic loop for one user turn.
+    Run the agentic loop for one user turn as an async generator.
 
-    Returns `(reply_text, verified_partner_id_or_None)`. The second value
-    is non-None only when `verify_email_otp` succeeded during this call —
-    the caller uses it to persist the session→partner link.
+    Yields event dicts the caller forwards to the client and persists:
+
+      - {"type": "interim", "content": str}
+            natural-language narration the model emitted ALONGSIDE a round's
+            tool calls (e.g. "You're verified — now creating your order."),
+            shown to the user before the final reply.
+      - {"type": "final", "content": str, "verified_partner_id": int | None}
+            the final reply. `verified_partner_id` is non-None only when
+            `verify_email_otp` succeeded during this call — the caller uses it
+            to persist the session→partner link.
+
+    Raises `session_svc.SessionClosed` if the session is closed mid-run.
     """
     mcp = get_mcp()
     tool_schemas = mcp.tool_schemas
@@ -181,13 +191,25 @@ async def process_message(
                     "agent: round %d forced retry failed: %s",
                     round_num + 1, exc,
                 )
-        # if the message has no tool_calls then return the llm's response 
+        # if the message has no tool_calls then emit the final reply and stop
         if not message.tool_calls:
-            return _extract_reply(message), verified_partner_id
+            yield {
+                "type": "final",
+                "content": _extract_reply(message),
+                "verified_partner_id": verified_partner_id,
+            }
+            return
 
         # Tools are about to execute — gate the classifier off for any
         # subsequent rounds in this turn (they are wrap-up rounds).
         tool_called_in_turn = True
+
+        # Emit any natural-language content the model produced ALONGSIDE its
+        # tool calls (e.g. "You're verified — now creating your order.") as an
+        # interim narration step the user sees before this round's tools run.
+        # Only the real content is taken — reasoning traces are excluded.
+        if message.content and message.content.strip():
+            yield {"type": "interim", "content": message.content.strip()}
 
         conversation.append(message)
 
@@ -294,10 +316,18 @@ async def process_message(
             model=cfg.llm.model_name,
             messages=conversation,
         )
-        return _extract_reply(final.choices[0].message), verified_partner_id
+        yield {
+            "type": "final",
+            "content": _extract_reply(final.choices[0].message),
+            "verified_partner_id": verified_partner_id,
+        }
     except Exception as exc:
         _logger.warning("agent: fallback completion failed: %s", exc)
-        return (
-            "I've looked into your request but wasn't able to finish processing. "
-            "Could you please try rephrasing or simplifying your question?"
-        ), verified_partner_id
+        yield {
+            "type": "final",
+            "content": (
+                "I've looked into your request but wasn't able to finish processing. "
+                "Could you please try rephrasing or simplifying your question?"
+            ),
+            "verified_partner_id": verified_partner_id,
+        }
