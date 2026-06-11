@@ -19,8 +19,10 @@ from ..auth import Principal, current_principal
 from ..config import get_settings
 
 # limiter: shared slowapi throttler — its .limit() decorator caps how fast a
-# single caller may POST /message (see ratelimit.py)
-from ..ratelimit import limiter
+# single caller may POST /message
+# identity_key_for: the per-caller key ("partner:<id>" / "ip:<addr>") shared by
+# the rate limiter and the daily token budget (see ratelimit.py)
+from ..ratelimit import limiter, identity_key_for
 
 # handle_chat: the orchestrator that runs the agent loop, saves messages, and triggers summaries
 from ..chat_pipeline import handle_chat
@@ -49,6 +51,7 @@ from ..schemas import (
 from ..services import (
     fact as fact_svc,
     session as session_svc,
+    usage as usage_svc,
 )
 
 _logger = logging.getLogger(__name__)
@@ -98,6 +101,8 @@ async def post_message(
             detail="session_token is required for anonymous users",
         )
 
+    cfg = get_odoo_config()
+
     # Availability gate — the real enforcement of mcp_chatbot.status. The
     # widget already refuses to send when the status isn't 'online', but that
     # is cosmetic: anyone holding a valid JWT can call this endpoint directly.
@@ -105,15 +110,84 @@ async def post_message(
     # unexpected status value never lets traffic through. Checked BEFORE the
     # pipeline so an offline chatbot creates no session, persists nothing, and
     # spends no LLM tokens.
-    if get_odoo_config().status != "online":
+    if cfg.status != "online":
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Chatbot is currently offline.",
         )
 
-    # delegate the real work to the pipeline — it runs the agent loop, persists messages,
-    # and returns (reply_text, did_summarize) where did_summarize flags that history was compacted
-    reply, did_summarize = await handle_chat(principal, user_message)
+    # Per-identity daily token budget. Same key as the rate limiter:
+    # "partner:<id>" for logged-in users, "ip:<addr>" for anonymous visitors —
+    # so one heavy user is throttled in isolation and can never exhaust a budget
+    # shared by everyone else. A budget of 0 disables that tier.
+    identity_key = identity_key_for(principal, request)
+    budget = (
+        cfg.daily_token_budget_authenticated
+        if principal.partner_id
+        else cfg.daily_token_budget_anonymous
+    )
+    if budget > 0:
+        try:
+            used_today = await usage_svc.get_today_tokens(identity_key)
+        except Exception as exc:
+            # Fail open: a usage-table glitch must not take chat down.
+            _logger.warning("message: usage read failed for %s: %s", identity_key, exc)
+            used_today = 0
+
+        # Anonymous visitors can lift their ceiling for the current session:
+        #   - +verified_anonymous_bonus once the session is OTP-verified
+        #   - +otp_pending_grace while verification is in progress (so an
+        #     over-budget visitor can still finish the OTP + order flow)
+        # The verified bonus supersedes the grace (not stacked). We only pay for
+        # the extra session lookup once the caller has actually hit the base
+        # budget — under it, the bonus can't change the allow/deny outcome.
+        effective_budget = budget
+        if (
+            used_today >= budget
+            and not principal.partner_id
+            and principal.session_token
+        ):
+            try:
+                sess = await session_svc.lookup_by_token(principal.session_token)
+            except Exception as exc:
+                _logger.warning("message: session lookup failed for budget grace: %s", exc)
+                sess = None
+            if sess and sess.get("state") == "open":
+                if sess.get("partner_id"):
+                    effective_budget += cfg.verified_anonymous_bonus
+                elif sess.get("otp_pending"):
+                    effective_budget += cfg.otp_pending_grace
+
+        if used_today >= effective_budget:
+            # Structured detail so the widget can tell this apart from a
+            # rate-limit 429 (which means "slow down", not "done for today").
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail={
+                    "code": "daily_budget_exceeded",
+                    "message": "You've reached today's usage limit. Please try again tomorrow.",
+                },
+            )
+
+    # delegate the real work to the pipeline — it runs the agent loop, persists
+    # messages, and returns (reply_text, did_summarize, tokens_used) where
+    # did_summarize flags that history was compacted and tokens_used is this
+    # turn's total provider-reported token cost.
+    reply, did_summarize, tokens_used = await handle_chat(principal, user_message)
+
+    # Charge this turn's tokens to the caller. Best-effort: an accounting write
+    # must never fail the user's reply. The check above runs on the PRE-turn
+    # total, so a caller can overshoot by at most one turn — acceptable.
+    try:
+        await usage_svc.record_usage(
+            identity_key,
+            tokens_used,
+            partner_id=principal.partner_id,
+            ip_address=identity_key[3:] if identity_key.startswith("ip:") else None,
+        )
+    except Exception as exc:
+        _logger.warning("message: usage record failed for %s: %s", identity_key, exc)
+
     return MessageResponse(reply=reply, summarized=did_summarize)
 
 

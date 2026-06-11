@@ -20,12 +20,12 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 # RateLimitExceeded: raised by slowapi when a caller exceeds a limit
-# _rate_limit_exceeded_handler: turns that into a clean HTTP 429 response
 from slowapi.errors import RateLimitExceeded
-from slowapi import _rate_limit_exceeded_handler
 
-# limiter: the shared throttler applied to POST /message (see ratelimit.py)
-from .ratelimit import limiter
+# limiter: the shared throttler applied to POST /message
+# rate_limit_handler: our 429 handler that returns a structured detail.code
+# the widget can distinguish from a budget 429 (see ratelimit.py)
+from .ratelimit import limiter, rate_limit_handler
 
 # get_settings: reads our .env file and returns all infrastructure config (ports, passwords, etc.)
 from .config import get_settings
@@ -88,7 +88,7 @@ app = FastAPI(
 # app.state inside the @limiter.limit(...) decorator, and the exception
 # handler converts a tripped limit into a clean HTTP 429 response.
 app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_exception_handler(RateLimitExceeded, rate_limit_handler)
 
 # Read the .env settings once and store them — we need cors_origins_list below
 _settings = get_settings()

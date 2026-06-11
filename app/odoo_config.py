@@ -17,6 +17,10 @@ Keys read
     mcp_chatbot.idle_timeout         (default 30 minutes)
     mcp_chatbot.bot_name             (default "AI Assistant")
     mcp_chatbot.status               (default "online")
+    mcp_chatbot.daily_token_budget_authenticated  (default 500000; 0 disables)
+    mcp_chatbot.daily_token_budget_anonymous      (default 300000; 0 disables)
+    mcp_chatbot.verified_anonymous_bonus          (default 200000)
+    mcp_chatbot.otp_pending_grace                 (default 30000)
     mcp_chatbot.summary_api_key      (falls back to main)
     mcp_chatbot.summary_base_url     (falls back to main)
     mcp_chatbot.summary_model_id     (falls back to main)
@@ -55,9 +59,17 @@ class OdooConfig:
     system_prompt: str     
     max_tool_rounds: int   
     summary_interval: int
-    idle_timeout: int      
-    bot_name: str          
-    status: str            
+    idle_timeout: int
+    bot_name: str
+    status: str
+    # Per-identity daily token budgets (0 = that budget is disabled).
+    daily_token_budget_authenticated: int
+    daily_token_budget_anonymous: int
+    # Extra daily allowance for an anonymous session once it is OTP-verified.
+    verified_anonymous_bonus: int
+    # Grace granted while an anonymous session is mid-verification (otp_pending),
+    # so a checkout in progress isn't cut off. Superseded by the verified bonus.
+    otp_pending_grace: int
     llm: LLMConfig
     summary_llm: LLMConfig
     fact_llm: LLMConfig
@@ -123,6 +135,10 @@ def load_odoo_config() -> OdooConfig:
         idle_timeout    = int(param.get_param("mcp_chatbot.idle_timeout") or "30"),
         bot_name        = param.get_param("mcp_chatbot.bot_name") or "AI Assistant",
         status          = param.get_param("mcp_chatbot.status") or "online",
+        daily_token_budget_authenticated = int(param.get_param("mcp_chatbot.daily_token_budget_authenticated") or "500000"),
+        daily_token_budget_anonymous     = int(param.get_param("mcp_chatbot.daily_token_budget_anonymous") or "300000"),
+        verified_anonymous_bonus         = int(param.get_param("mcp_chatbot.verified_anonymous_bonus") or "200000"),
+        otp_pending_grace                = int(param.get_param("mcp_chatbot.otp_pending_grace") or "30000"),
         llm             = LLMConfig(main_api_key, main_base_url, main_model),
         summary_llm     = LLMConfig(summary_api_key, summary_base_url, summary_model),
         fact_llm        = LLMConfig(fact_api_key, fact_base_url, fact_model),
@@ -133,9 +149,11 @@ def load_odoo_config() -> OdooConfig:
     # log a confirmation so we can verify the correct settings were loaded at startup
     _logger.info(
         "odoo_config loaded: bot_name=%r, mcp_server=%r, model=%r, "
-        "max_tool_rounds=%d, summary_interval=%d",
+        "max_tool_rounds=%d, summary_interval=%d, "
+        "daily_budget(auth=%d, anon=%d)",
         cfg.bot_name, cfg.mcp_server_url, cfg.llm.model_name,
         cfg.max_tool_rounds, cfg.summary_interval,
+        cfg.daily_token_budget_authenticated, cfg.daily_token_budget_anonymous,
     )
     return cfg
 

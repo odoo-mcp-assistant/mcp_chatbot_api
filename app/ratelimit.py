@@ -27,10 +27,12 @@ users behind one shared office IP from throttling each other.
 import logging
 
 from fastapi import HTTPException, Request
+from fastapi.responses import JSONResponse
 from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from .auth import verify_token
+from .auth import Principal, verify_token
 
 _logger = logging.getLogger(__name__)
 
@@ -52,8 +54,26 @@ def _client_ip(request: Request) -> str:
     return get_remote_address(request)
 
 
+def identity_key_for(principal: Principal, request: Request) -> str:
+    """Canonical per-caller key shared by the rate limiter and the token
+    budget: "partner:<id>" for logged-in users, "ip:<address>" otherwise.
+
+    Keeping both features on the same key means a caller is throttled and
+    budgeted as one identity. See the module docstring for why anonymous
+    callers are keyed by IP rather than their (rotatable) session_token.
+    """
+    if principal.partner_id:
+        return f"partner:{principal.partner_id}"
+    return f"ip:{_client_ip(request)}"
+
+
 def rate_limit_key(request: Request) -> str:
-    """Throttling bucket for the current request (see module docstring)."""
+    """Throttling bucket for the current request (see module docstring).
+
+    slowapi calls this with only the raw Request (no decoded Principal), so we
+    verify the token here and delegate to identity_key_for for the actual key.
+    """
+    principal = Principal(partner_id=None, session_token=None)
     auth = request.headers.get("authorization", "")
     if auth.lower().startswith("bearer "):
         try:
@@ -62,12 +82,34 @@ def rate_limit_key(request: Request) -> str:
             # Invalid/expired token — fall through to IP. The endpoint's own
             # auth dependency will reject it with 401 anyway.
             pass
-        else:
-            if principal.partner_id:
-                return f"partner:{principal.partner_id}"
-    return f"ip:{_client_ip(request)}"
+    return identity_key_for(principal, request)
 
 
 # Shared limiter. key_func is the default bucket for every decorated route.
 # Registered on the app in main.py (app.state.limiter + exception handler).
 limiter = Limiter(key_func=rate_limit_key)
+
+
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded) -> JSONResponse:
+    """429 handler for a tripped rate limit.
+
+    Replaces slowapi's default handler so the body carries a structured
+    `detail.code` ("rate_limited") matching the budget 429's shape — letting
+    the widget show "slow down" rather than the budget's "done for today".
+    A Retry-After header is included so well-behaved clients can back off.
+    """
+    response = JSONResponse(
+        status_code=429,
+        content={
+            "detail": {
+                "code": "rate_limited",
+                "message": "You're sending messages too quickly. "
+                           "Please wait a few seconds and try again.",
+            }
+        },
+    )
+    # slowapi stamps request.state.view_rate_limit; mirror its Retry-After if set.
+    retry_after = getattr(exc, "retry_after", None)
+    if retry_after:
+        response.headers["Retry-After"] = str(retry_after)
+    return response

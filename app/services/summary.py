@@ -32,9 +32,15 @@ SUMMARY_SYSTEM_PROMPT = (
 )
 
 
-async def summarize(history: list[dict[str, str]], llm: LLMConfig) -> str:
+async def summarize(history: list[dict[str, str]], llm: LLMConfig) -> tuple[str, int]:
+    """Return `(summary_text, tokens_used)`.
+
+    tokens_used is the provider-reported total_tokens for this summarisation
+    call (0 when there's nothing to summarise) so the caller can fold it into
+    per-user usage accounting.
+    """
     if not history:
-        return ""
+        return "", 0
 
     client = get_async_openai(llm.api_key, llm.base_url)
     formatted = "\n".join(
@@ -53,4 +59,6 @@ async def summarize(history: list[dict[str, str]], llm: LLMConfig) -> str:
         temperature=0.3,
     )
 
-    return response.choices[0].message.content or ""
+    usage = getattr(response, "usage", None)
+    tokens = int(getattr(usage, "total_tokens", 0) or 0) if usage else 0
+    return (response.choices[0].message.content or ""), tokens

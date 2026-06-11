@@ -82,7 +82,7 @@ async def needs_tool_call(
     llm: Any,
     reasoning: str | None,
     tool_schemas: list[dict] | None = None,
-) -> bool:
+) -> tuple[bool, int]:
     """Ask the LLM whether the given reasoning trace implied a tool call.
 
     `tool_schemas` (the same OpenAI-style list the agent advertises) is shown
@@ -90,10 +90,14 @@ async def needs_tool_call(
     a generic example list — this is what lets it tell a dropped `confirm_order`
     from a plain formatting reply.
 
+    Returns `(needs_tool_call, tokens_used)`. tokens_used is the provider-
+    reported total_tokens for the classifier call (0 when it short-circuits or
+    errors) so the caller can fold it into per-user usage accounting.
+
     Returns False on empty input or any error — the conservative choice
     (we'd rather skip a fallback retry than burn tokens on a bad call)."""
     if not reasoning or not reasoning.strip():
-        return False
+        return False, 0
     try:
         resp = await llm.chat.completions.create(
             model="moonshot-v1-8k",
@@ -107,16 +111,18 @@ async def needs_tool_call(
             temperature=1,
             max_tokens=4,
         )
+        usage = getattr(resp, "usage", None)
+        tokens = int(getattr(usage, "total_tokens", 0) or 0) if usage else 0
         verdict = (resp.choices[0].message.content or "").strip().lower()
         is_yes = verdict.startswith("yes")
         _logger.info(
             "intent_classifier: verdict=%r → needs_tool_call=%s",
             verdict, is_yes,
         )
-        return is_yes
+        return is_yes, tokens
     except Exception as exc:
         _logger.warning("intent_classifier: classification failed: %s", exc)
-        return False
+        return False, 0
 
 
 _FORCE_NUDGE = (

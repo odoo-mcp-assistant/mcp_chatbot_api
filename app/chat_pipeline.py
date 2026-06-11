@@ -30,9 +30,19 @@ def _estimate_tokens(messages: list[dict]) -> int:
     return sum(len((m.get("content") or "")) // 4 for m in messages)
 
 
-async def handle_chat(principal: Principal, user_message: str) -> tuple[str, bool]:
-    """Process one user turn. Returns (reply, did_summarize_this_turn)."""
+async def handle_chat(principal: Principal, user_message: str) -> tuple[str, bool, int]:
+    """Process one user turn.
+
+    Returns (reply, did_summarize_this_turn, total_tokens), where total_tokens
+    is the provider-reported token cost of every LLM call this turn made
+    (history summarisation + the full agent loop), for per-user budget
+    accounting by the caller.
+    """
     cfg = get_odoo_config()
+
+    # Running token cost for this turn, summed across the summary call and the
+    # agent loop. Reported back so the router can charge it to the caller.
+    total_tokens = 0
 
     # -------------------------------------------------------------------------
     # STEP 1 — Resolve or create the Odoo session for this user.
@@ -109,10 +119,11 @@ async def handle_chat(principal: Principal, user_message: str) -> tuple[str, boo
                     f"{sess['history_summary']}"
                 ),
             }]
-        new_summary = await summary_svc.summarize(
+        new_summary, summary_tokens = await summary_svc.summarize(
             summary_prefix + unsummarized_messages,
             cfg.summary_llm,
         )
+        total_tokens += summary_tokens
         # Persist the new summary and record how many messages it now covers.
         await session_svc.save_summary(session_id, new_summary, prior_count)
         # Update the local sess dict so the assembly step below sees the new summary.
@@ -183,19 +194,22 @@ async def handle_chat(principal: Principal, user_message: str) -> tuple[str, boo
     # newly confirmed partner_id (otherwise None).
     # -------------------------------------------------------------------------
     try:
-        reply, verified_partner_id = await process_message(
+        reply, verified_partner_id, agent_tokens = await process_message(
             user_message=user_message,
             history=conversation_history,
             cfg=cfg,
             authenticated_partner_id=effective_partner_id,
-            session_id=session_id, #for health check of the session 
+            session_id=session_id, #for health check of the session
         )
+        total_tokens += agent_tokens
     except session_svc.SessionClosed:
         _logger.info(
             "chat: session %s closed during agent run — skipping persistence",
             session_id,
         )
-        return "", False
+        # Return any tokens already spent this turn (e.g. summarisation) so
+        # they're still charged even though the agent run was aborted.
+        return "", False, total_tokens
     except Exception as exc:
         _logger.exception("chat: agent pipeline error: %s", exc)
         reply = "Sorry, I encountered an error. Please try again."
@@ -219,4 +233,4 @@ async def handle_chat(principal: Principal, user_message: str) -> tuple[str, boo
         except Exception as exc:
             _logger.warning("chat: touch_activity failed: %s", exc)
 
-    return reply, did_summarize
+    return reply, did_summarize, total_tokens

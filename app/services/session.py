@@ -30,6 +30,7 @@ from ..odoo_client import get_client
 SESSION_FIELDS = [
     "id", "name", "partner_id", "session_token", "state",
     "history_summary", "last_summarized_count", "last_activity",
+    "otp_pending",
 ]
 
 
@@ -171,6 +172,15 @@ async def touch_activity(session_id: int) -> None:
     # browse(id) builds a recordset from a known id (no DB query yet);
     # then we call the custom Odoo method touch_activity() on it.
     odoo.env["mcp.chatbot.session"].browse(session_id).touch_activity()
+
+
+# Flags the session as mid-verification. The agent calls this right after a
+# successful send_verification_email so the budget pre-check grants the OTP
+# grace, letting an over-budget anonymous visitor finish checkout. It's a
+# direct write (not via a model method) and is best-effort at the call site.
+async def set_otp_pending(session_id: int, value: bool = True) -> None:
+    odoo = get_client()
+    odoo.env["mcp.chatbot.session"].browse(session_id).write({"otp_pending": value})
 
 
 

@@ -74,6 +74,17 @@ def _extract_reply(msg) -> str:
         or getattr(msg, "reasoning", "")
         or ""
     )
+
+
+def _usage_tokens(response) -> int:
+    """Provider-reported total_tokens for one chat completion (0 if absent).
+
+    `usage` is the provider's own billing meter — the source of truth for
+    per-user accounting. It can be missing on streamed responses (we don't
+    stream) or on an error short-circuit, so guard defensively.
+    """
+    usage = getattr(response, "usage", None)
+    return int(getattr(usage, "total_tokens", 0) or 0) if usage else 0
 def _mcp_result_to_text(mcp_result) -> str:
     # mcp_result.content is list[TextContent]; str() on it leaks Python repr
     # (TextContent(type='text', text='...')) into the LLM context, which Kimi
@@ -88,13 +99,16 @@ async def process_message(
     cfg: OdooConfig,
     authenticated_partner_id: int | None = None,
     session_id: int | None = None,
-) -> tuple[str, int | None]:
+) -> tuple[str, int | None, int]:
     """
     Run the agentic loop for one user turn.
 
-    Returns `(reply_text, verified_partner_id_or_None)`. The second value
-    is non-None only when `verify_email_otp` succeeded during this call —
-    the caller uses it to persist the session→partner link.
+    Returns `(reply_text, verified_partner_id_or_None, total_tokens)`.
+    - verified_partner_id is non-None only when `verify_email_otp` succeeded
+      during this call — the caller uses it to persist the session→partner link.
+    - total_tokens is the summed provider-reported `usage.total_tokens` across
+      every LLM call this turn made (agent rounds + intent classifier + forced
+      retry + wrap-up), used by the caller for per-user budget accounting.
     """
     mcp = get_mcp()
     tool_schemas = mcp.tool_schemas
@@ -105,6 +119,9 @@ async def process_message(
     conversation.append({"role": "user", "content": user_message})
 
     verified_partner_id: int | None = None
+
+    # Running sum of provider-reported tokens for every LLM call this turn.
+    total_tokens = 0
 
     # Tracks whether a tool has already been called in any previous round of
     # this turn. Used to gate the intent classifier: empirically Kimi only
@@ -129,6 +146,7 @@ async def process_message(
             tools=tool_schemas,
             tool_choice="auto",
         )
+        total_tokens += _usage_tokens(response)
         message = response.choices[0].message
         reasoning = getattr(message, "reasoning_content", None) or getattr(message, "reasoning", None)
         if reasoning:
@@ -144,12 +162,13 @@ async def process_message(
         # Skipped on rounds where a tool has already been called earlier in
         # this turn (those are wrap-up rounds — the classifier would waste
         # cycles and may false-positive on summarisation reasoning).
-        if (
-            not message.tool_calls
-            and reasoning
-            and not tool_called_in_turn
-            and await needs_tool_call(llm, reasoning, tool_schemas)
-        ):
+        classifier_says_retry = False
+        if not message.tool_calls and reasoning and not tool_called_in_turn:
+            classifier_says_retry, classifier_tokens = await needs_tool_call(
+                llm, reasoning, tool_schemas,
+            )
+            total_tokens += classifier_tokens
+        if classifier_says_retry:
             _logger.warning(
                 "agent: round %d classifier flagged dropped tool call — "
                 "re-issuing with force-call nudge",
@@ -159,6 +178,7 @@ async def process_message(
                 forced = await force_tool_call(
                     llm, cfg.llm.model_name, conversation, tool_schemas,
                 )
+                total_tokens += _usage_tokens(forced)
                 forced_msg = forced.choices[0].message
                 if forced_msg.tool_calls:
                     message = forced_msg
@@ -181,9 +201,9 @@ async def process_message(
                     "agent: round %d forced retry failed: %s",
                     round_num + 1, exc,
                 )
-        # if the message has no tool_calls then return the llm's response 
+        # if the message has no tool_calls then return the llm's response
         if not message.tool_calls:
-            return _extract_reply(message), verified_partner_id
+            return _extract_reply(message), verified_partner_id, total_tokens
 
         # Tools are about to execute — gate the classifier off for any
         # subsequent rounds in this turn (they are wrap-up rounds).
@@ -262,10 +282,28 @@ async def process_message(
                         parsed = json.loads(result_text)
                         if parsed.get("success") and parsed.get("partner_id"):
                             authenticated_partner_id = parsed["partner_id"] # needed if the verification is done mid session for later tool calls existing in AUTH_REQUIRED_TOOLS
-                            verified_partner_id = parsed["partner_id"] # the function returns it and it's used as signal that the user became verified in this section 
+                            verified_partner_id = parsed["partner_id"] # the function returns it and it's used as signal that the user became verified in this section
                     except Exception as exc:
                         _logger.debug(
                             "agent: verify_email_otp parse failed: %s", exc
+                        )
+
+                # An anonymous visitor just kicked off email verification. Flag
+                # the session as mid-checkout so the budget pre-check grants the
+                # OTP grace next turn — otherwise an over-budget visitor could be
+                # blocked between receiving the code and submitting it, losing
+                # the order. Best-effort: a failed flag just means no grace.
+                if (
+                    name == "send_verification_email"
+                    and session_id is not None
+                    and not authenticated_partner_id
+                ):
+                    try:
+                        await session_svc.set_otp_pending(session_id)
+                    except Exception as exc:
+                        _logger.warning(
+                            "agent: set_otp_pending failed for session %s: %s",
+                            session_id, exc,
                         )
             except Exception as exc:
                 _logger.exception("agent: tool '%s' failed: %s", name, exc)
@@ -294,10 +332,11 @@ async def process_message(
             model=cfg.llm.model_name,
             messages=conversation,
         )
-        return _extract_reply(final.choices[0].message), verified_partner_id
+        total_tokens += _usage_tokens(final)
+        return _extract_reply(final.choices[0].message), verified_partner_id, total_tokens
     except Exception as exc:
         _logger.warning("agent: fallback completion failed: %s", exc)
         return (
             "I've looked into your request but wasn't able to finish processing. "
             "Could you please try rephrasing or simplifying your question?"
-        ), verified_partner_id
+        ), verified_partner_id, total_tokens
