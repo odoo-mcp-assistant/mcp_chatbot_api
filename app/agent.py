@@ -19,6 +19,7 @@ Fact memory is handled post-session by `services.fact.extract_and_save`;
 the agent no longer has a `remember_fact` tool.
 """
 
+import asyncio
 import json
 import logging
 from collections.abc import AsyncGenerator
@@ -66,15 +67,16 @@ AUTH_REQUIRED_SUGGESTION = (
 )
 
 
-def _extract_reply(msg) -> str:
-    """Some providers stash the text under `reasoning_content` or `reasoning`
-    instead of `content` — fall through them all."""
-    return (
-        getattr(msg, "content", None)
-        or getattr(msg, "reasoning_content", "")
-        or getattr(msg, "reasoning", "")
-        or ""
-    )
+# How long (seconds) the agent waits AFTER a round's stream has ended for the
+# tool-intent classifier verdict. The classifier task is started while the
+# round is still streaming (the moment the reasoning trace completes), so it
+# normally resolves before this timer is even consulted — the bound only bites
+# when the provider is slow or overloaded, where skipping the fallback check
+# (conservative "no") beats holding the finished reply hostage: the composer
+# stays locked until `final` is emitted.
+CLASSIFIER_GRACE_S = 3.0
+
+
 def _mcp_result_to_text(mcp_result) -> str:
     # mcp_result.content is list[TextContent]; str() on it leaks Python repr
     # (TextContent(type='text', text='...')) into the LLM context, which Kimi
@@ -82,6 +84,88 @@ def _mcp_result_to_text(mcp_result) -> str:
     parts = getattr(mcp_result, "content", None) or []
     texts = [getattr(p, "text", "") for p in parts if getattr(p, "text", None)]
     return "\n".join(texts) if texts else "{}"
+
+
+async def _stream_completion(llm, **create_kwargs) -> AsyncGenerator[dict, None]:
+    """Run one chat completion with stream=True and consume it.
+
+    Yields `{"type": "delta", "content": <token chunk>}` for every content
+    fragment as it arrives, then exactly one terminal
+    `{"type": "round", "content": str, "reasoning": str, "tool_calls": list[dict]}`
+    carrying the fully assembled message.
+
+    Additionally yields one `{"type": "reasoning_done", "reasoning": str}`
+    right before the FIRST content delta when the model produced a reasoning
+    trace — thinking models finish reasoning before content starts, so at that
+    point the trace is complete and the caller can start working with it (the
+    tool-intent classifier) concurrently with the rest of the stream.
+
+    Tool calls arrive fragmented across chunks (id/name once, `arguments` in
+    string pieces, all keyed by `index`) and are reassembled here into plain
+    OpenAI-format dicts — id and name are set from their first non-empty
+    fragment, arguments are concatenated. Reasoning deltas
+    (`reasoning_content`/`reasoning`) are accumulated but NOT yielded: they
+    feed the intent classifier and the empty-content fallback only.
+    """
+    stream = await llm.chat.completions.create(stream=True, **create_kwargs)
+
+    content_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    # Which delta attribute carried the reasoning trace ("reasoning_content"
+    # for Moonshot/Kimi, "reasoning" elsewhere). Thinking providers require
+    # the trace echoed back under the SAME field on assistant tool-call
+    # messages, so the caller needs the name, not just the text.
+    reasoning_field: str | None = None
+    tool_calls_by_index: dict[int, dict] = {}
+
+    async for chunk in stream:
+        if not chunk.choices:
+            continue
+        delta = chunk.choices[0].delta
+        if delta is None:
+            continue
+
+        text = getattr(delta, "content", None)
+        if text:
+            if reasoning_parts and not content_parts:
+                # First content token → the reasoning phase is over; hand the
+                # complete trace to the caller before forwarding any content.
+                yield {"type": "reasoning_done", "reasoning": "".join(reasoning_parts)}
+            content_parts.append(text)
+            yield {"type": "delta", "content": text}
+
+        reasoning = getattr(delta, "reasoning_content", None)
+        if reasoning:
+            reasoning_field = reasoning_field or "reasoning_content"
+        else:
+            reasoning = getattr(delta, "reasoning", None)
+            if reasoning:
+                reasoning_field = reasoning_field or "reasoning"
+        if reasoning:
+            reasoning_parts.append(reasoning)
+
+        for tc in getattr(delta, "tool_calls", None) or []:
+            idx = tc.index if tc.index is not None else 0
+            entry = tool_calls_by_index.setdefault(idx, {
+                "id": "",
+                "type": "function",
+                "function": {"name": "", "arguments": ""},
+            })
+            if tc.id and not entry["id"]:
+                entry["id"] = tc.id
+            if tc.function:
+                if tc.function.name and not entry["function"]["name"]:
+                    entry["function"]["name"] = tc.function.name
+                if tc.function.arguments:
+                    entry["function"]["arguments"] += tc.function.arguments
+
+    yield {
+        "type": "round",
+        "content": "".join(content_parts),
+        "reasoning": "".join(reasoning_parts),
+        "reasoning_field": reasoning_field or "reasoning_content",
+        "tool_calls": [tool_calls_by_index[i] for i in sorted(tool_calls_by_index)],
+    }
 
 async def process_message(
     user_message: str,
@@ -95,14 +179,20 @@ async def process_message(
 
     Yields event dicts the caller forwards to the client and persists:
 
-      - {"type": "interim", "content": str}
-            natural-language narration the model emitted ALONGSIDE a round's
-            tool calls (e.g. "You're verified — now creating your order."),
-            shown to the user before the final reply.
+      - {"type": "delta", "content": str}
+            one streamed token chunk of assistant text, live from the LLM.
+            Narration emitted alongside tool calls and the final reply both
+            arrive this way — the client just appends them in order.
+      - {"type": "tool_start"}
+            the current round finished streaming and produced tool calls,
+            which are about to execute. The client shows a busy indicator
+            until the next round's deltas arrive.
       - {"type": "final", "content": str, "verified_partner_id": int | None}
-            the final reply. `verified_partner_id` is non-None only when
-            `verify_email_otp` succeeded during this call — the caller uses it
-            to persist the session→partner link.
+            terminal event. `content` is the authoritative full text of the
+            LAST round (it can differ from what was streamed when the reply
+            only existed in the reasoning trace). `verified_partner_id` is
+            non-None only when `verify_email_otp` succeeded during this call —
+            the caller uses it to persist the session→partner link.
 
     Raises `session_svc.SessionClosed` if the session is closed mid-run.
     """
@@ -133,20 +223,46 @@ async def process_message(
             )
             raise session_svc.SessionClosed()
 
-        response = await llm.chat.completions.create(
+        # Stream this round's completion: content tokens are forwarded to the
+        # client the moment they arrive; the terminal "round" event carries the
+        # fully assembled message (content + reasoning + reassembled tool calls)
+        # that the loop logic below works with.
+        round_msg: dict = {}
+        classifier_task: asyncio.Task | None = None
+        async for ev in _stream_completion(
+            llm,
             model=cfg.llm.model_name,
             messages=conversation,
             tools=tool_schemas,
             tool_choice="auto",
-        )
-        message = response.choices[0].message
-        reasoning = getattr(message, "reasoning_content", None) or getattr(message, "reasoning", None)
+        ):
+            if ev["type"] == "delta":
+                yield ev
+            elif ev["type"] == "reasoning_done":
+                # The reasoning trace is complete while content is still
+                # streaming — start the tool-intent classifier NOW so its
+                # verdict overlaps the stream instead of stalling the turn
+                # after the user has already watched the reply finish.
+                # Speculative: cancelled below if the round turns out to have
+                # tool calls (where the classifier is irrelevant).
+                if not tool_called_in_turn and ev.get("reasoning"):
+                    classifier_task = asyncio.create_task(
+                        needs_tool_call(llm, ev["reasoning"], tool_schemas)
+                    )
+            else:
+                round_msg = ev
+
+        content = round_msg.get("content") or ""
+        reasoning = round_msg.get("reasoning") or ""
+        reasoning_field = round_msg.get("reasoning_field") or "reasoning_content"
+        tool_calls = round_msg.get("tool_calls") or []
+
         if reasoning:
             _logger.info("agent: round %d reasoning: %s", round_num + 1, reasoning)
-        if message.content:
-            _logger.info("agent: round %d content: %s", round_num + 1, message.content)
-        if message.tool_calls:
-            _logger.info("agent: round %d tool_calls: %s", round_num + 1, [tc.function.name for tc in message.tool_calls])
+        if content:
+            _logger.info("agent: round %d content: %s", round_num + 1, content)
+        if tool_calls:
+            _logger.info("agent: round %d tool_calls: %s", round_num + 1, [tc["function"]["name"] for tc in tool_calls])
 
         # Fallback: model produced no tool_calls. The trained classifier
         # decides — from the reasoning trace — whether a tool was intended.
@@ -154,32 +270,77 @@ async def process_message(
         # Skipped on rounds where a tool has already been called earlier in
         # this turn (those are wrap-up rounds — the classifier would waste
         # cycles and may false-positive on summarisation reasoning).
-        if (
-            not message.tool_calls
-            and reasoning
-            and not tool_called_in_turn
-            and await needs_tool_call(llm, reasoning, tool_schemas)
-        ):
+        # Resolve the tool-intent classifier verdict. The task was usually
+        # started mid-stream (reasoning_done) and has been running while the
+        # content painted, so this await is normally instant; the grace bound
+        # covers tasks still in flight — and the rare round that produced
+        # reasoning but no content (no reasoning_done fired), where the
+        # classifier only gets started here.
+        flagged_dropped_call = False
+        if not tool_calls and reasoning and not tool_called_in_turn:
+            if classifier_task is None:
+                classifier_task = asyncio.create_task(
+                    needs_tool_call(llm, reasoning, tool_schemas)
+                )
+            try:
+                flagged_dropped_call = await asyncio.wait_for(
+                    classifier_task, CLASSIFIER_GRACE_S
+                )
+            except asyncio.TimeoutError:
+                # wait_for cancelled the task; conservative "no" — skipping a
+                # fallback retry beats stalling the already-painted reply.
+                _logger.warning(
+                    "agent: round %d intent classifier exceeded %.0fs grace — skipping",
+                    round_num + 1, CLASSIFIER_GRACE_S,
+                )
+        elif classifier_task is not None:
+            # Round produced tool calls after all — the speculative check is
+            # irrelevant; drop it without waiting.
+            classifier_task.cancel()
+
+        if flagged_dropped_call:
             _logger.warning(
                 "agent: round %d classifier flagged dropped tool call — "
                 "re-issuing with force-call nudge",
                 round_num + 1,
             )
             try:
+                # The forced retry is NOT streamed: this path fires when the
+                # model produced reasoning but no tool call, so there is almost
+                # never user-visible content to stream — and any content the
+                # original round DID stream is superseded by the final event's
+                # authoritative rebuild on the client.
                 forced = await force_tool_call(
                     llm, cfg.llm.model_name, conversation, tool_schemas,
                 )
                 forced_msg = forced.choices[0].message
                 if forced_msg.tool_calls:
-                    message = forced_msg
-                    reasoning = (
-                        getattr(message, "reasoning_content", None)
-                        or getattr(message, "reasoning", None)
-                    )
+                    # Convert the SDK message to the same plain-dict shape the
+                    # streamed path produces, so the code below sees one format.
+                    content = forced_msg.content or ""
+                    if getattr(forced_msg, "reasoning_content", None):
+                        reasoning = forced_msg.reasoning_content
+                        reasoning_field = "reasoning_content"
+                    elif getattr(forced_msg, "reasoning", None):
+                        reasoning = forced_msg.reasoning
+                        reasoning_field = "reasoning"
+                    else:
+                        reasoning = ""
+                    tool_calls = [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments or "",
+                            },
+                        }
+                        for tc in forced_msg.tool_calls
+                    ]
                     _logger.info(
                         "agent: round %d forced retry succeeded, tool_calls: %s",
                         round_num + 1,
-                        [tc.function.name for tc in message.tool_calls],
+                        [tc["function"]["name"] for tc in tool_calls],
                     )
                 else:
                     _logger.warning(
@@ -191,32 +352,45 @@ async def process_message(
                     "agent: round %d forced retry failed: %s",
                     round_num + 1, exc,
                 )
-        # if the message has no tool_calls then emit the final reply and stop
-        if not message.tool_calls:
+        # No tool calls → the streamed content WAS the final reply. The final
+        # event re-carries the full text (falling back to the reasoning trace
+        # for providers that stash the reply there and stream no content).
+        if not tool_calls:
             yield {
                 "type": "final",
-                "content": _extract_reply(message),
+                "content": content.strip() or reasoning.strip() or "",
                 "verified_partner_id": verified_partner_id,
             }
             return
 
         # Tools are about to execute — gate the classifier off for any
-        # subsequent rounds in this turn (they are wrap-up rounds).
+        # subsequent rounds in this turn (those are wrap-up rounds) and tell
+        # the client to show its busy indicator until the next round streams.
         tool_called_in_turn = True
+        yield {"type": "tool_start"}
 
-        # Emit any natural-language content the model produced ALONGSIDE its
-        # tool calls (e.g. "You're verified — now creating your order.") as an
-        # interim narration step the user sees before this round's tools run.
-        # Only the real content is taken — reasoning traces are excluded.
-        if message.content and message.content.strip():
-            yield {"type": "interim", "content": message.content.strip()}
+        # The streamed path has no SDK message object to append — rebuild the
+        # assistant message in OpenAI dict format (content may be empty when
+        # the model went straight to tool calls).
+        assistant_msg: dict = {
+            "role": "assistant",
+            "content": content or None,
+            "tool_calls": tool_calls,
+        }
+        # Thinking providers (Moonshot/Kimi) reject the next request with 400
+        # "thinking is enabled but reasoning_content is missing" unless the
+        # reasoning trace is echoed back on assistant tool-call messages. The
+        # old non-streamed code got this for free by appending the SDK object;
+        # the rebuilt dict must carry it explicitly, under the same field name
+        # the provider streamed it with.
+        if reasoning:
+            assistant_msg[reasoning_field] = reasoning
+        conversation.append(assistant_msg)
 
-        conversation.append(message)
-
-        for tool_call in message.tool_calls:
-            name = tool_call.function.name
+        for tool_call in tool_calls:
+            name = tool_call["function"]["name"]
             try:
-                args = json.loads(tool_call.function.arguments or "{}")
+                args = json.loads(tool_call["function"]["arguments"] or "{}")
             except json.JSONDecodeError:
                 args = {}
             # Tools accept argments as dict if the llm doesn't emmit a dict as args we retunr empty dict  
@@ -238,7 +412,7 @@ async def process_message(
                 )
                 conversation.append({
                     "role": "tool",
-                    "tool_call_id": tool_call.id,
+                    "tool_call_id": tool_call["id"],
                     "name": name,
                     "content": json.dumps({
                         "error": "Already authenticated",
@@ -260,7 +434,7 @@ async def process_message(
                     )
                     conversation.append({
                         "role": "tool",
-                        "tool_call_id": tool_call.id,
+                        "tool_call_id": tool_call["id"],
                         "name": name,
                         "content": json.dumps({
                             "error": "Authentication required",
@@ -295,7 +469,7 @@ async def process_message(
 
             conversation.append({
                 "role": "tool",
-                "tool_call_id": tool_call.id,
+                "tool_call_id": tool_call["id"],
                 "name": name,
                 "content": result_text,
             })
@@ -312,13 +486,24 @@ async def process_message(
         ),
     })
     try:
-        final = await llm.chat.completions.create(
+        # Streamed like every other round — the wrap-up text types out live.
+        round_msg = {}
+        async for ev in _stream_completion(
+            llm,
             model=cfg.llm.model_name,
             messages=conversation,
-        )
+        ):
+            if ev["type"] == "delta":
+                yield ev
+            else:
+                round_msg = ev
         yield {
             "type": "final",
-            "content": _extract_reply(final.choices[0].message),
+            "content": (
+                (round_msg.get("content") or "").strip()
+                or (round_msg.get("reasoning") or "").strip()
+                or ""
+            ),
             "verified_partner_id": verified_partner_id,
         }
     except Exception as exc:

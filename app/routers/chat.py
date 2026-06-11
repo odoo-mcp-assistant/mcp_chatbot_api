@@ -4,7 +4,7 @@ import json
 import logging
 
 # StreamingResponse: streams the chat reply to the browser as Server-Sent
-# Events (text/event-stream) so interim narration appears as the agent runs.
+# Events (text/event-stream) so tokens appear live as the agent generates them.
 from fastapi.responses import StreamingResponse
 
 # APIRouter: groups related endpoints under a common prefix/tags — mounted on the app in main.py
@@ -55,8 +55,9 @@ router = APIRouter(prefix="/mcp_chatbot", tags=["chatbot"])
 
 
 # POST /mcp_chatbot/message — called by the widget when the user hits "Send".
-# Returns a Server-Sent Events stream (text/event-stream): the agent's interim
-# narration is pushed to the browser as it happens, then the final reply.
+# Returns a Server-Sent Events stream (text/event-stream): assistant text is
+# pushed token-by-token as the LLM generates it, with tool_start boundaries
+# while tools execute and a terminal final/error/closed event.
 @router.post("/message")
 async def post_message(
     body: MessageRequest,   # request body parsed and validated against MessageRequest
@@ -78,9 +79,10 @@ async def post_message(
         )
 
     # handle_chat runs the agent loop, persists messages, and yields event dicts
-    # ({"type": "interim"|"final"|"closed"|"error", ...}). We serialise each as
-    # one SSE frame: `data: <json>\n\n`. The widget parses these and renders
-    # interim bubbles + a "thinking" beat between them before the final reply.
+    # ({"type": "delta"|"tool_start"|"final"|"closed"|"error", ...}). We
+    # serialise each as one SSE frame: `data: <json>\n\n`. The widget appends
+    # deltas to the turn bubble live, shows a busy beat during tool_start, and
+    # rebuilds the bubble from the authoritative text carried by `final`.
     async def event_stream():
         # handle_chat catches agent-loop failures itself, but setup steps before
         # the loop (session resolution, persisting the user message) run here

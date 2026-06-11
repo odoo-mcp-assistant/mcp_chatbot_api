@@ -32,9 +32,9 @@ def _estimate_tokens(messages: list[dict]) -> int:
 
 
 def _join_turn(steps: list[str], reply: str) -> str:
-    """Combine a turn's interim narration steps and final reply into a single
-    assistant message, separated as markdown paragraphs — so the whole turn is
-    stored as one row and reloads as one continuous message."""
+    """Combine a turn's streamed narration segments and final reply into a
+    single assistant message, separated as markdown paragraphs — so the whole
+    turn is stored as one row and reloads as one continuous message."""
     parts = [p for p in (steps + [reply]) if p and p.strip()]
     return "\n\n".join(parts)
 
@@ -45,13 +45,17 @@ async def handle_chat(
     """Process one user turn as a stream of events for the SSE endpoint.
 
     Yields, in order:
-      - {"type": "interim", "content": str}              narration steps
-      - {"type": "final", "content": str, "summarized": bool}   final reply
-      - {"type": "closed"}                               session closed mid-run
-      - {"type": "error", "content": str}                pipeline failure
+      - {"type": "delta", "content": str}     one live token chunk of text
+      - {"type": "tool_start"}                tools executing; show busy state
+      - {"type": "final", "content": str, "summarized": bool}
+            terminal. `content` is the authoritative full turn text (all
+            narration segments + final reply joined) — the client rebuilds
+            the streamed bubble from it.
+      - {"type": "closed"}                    session closed mid-run
+      - {"type": "error", "content": str}     pipeline failure
 
-    The whole assistant turn (interim steps + final reply) is persisted to Odoo
-    before the terminating event is yielded.
+    The whole assistant turn is persisted to Odoo as ONE message before the
+    terminating event is yielded.
     """
     cfg = get_odoo_config()
 
@@ -203,9 +207,13 @@ async def handle_chat(
     # text reply and, if an OTP verification happened during this turn, the
     # newly confirmed partner_id (otherwise None).
     # -------------------------------------------------------------------------
-    # interim narration steps are accumulated as they stream so they can be
-    # persisted (in order) ahead of the final reply once the turn completes.
-    interim_steps: list[str] = []
+    # Narration segments completed so far (one per tool round that streamed
+    # text), plus the buffer for the segment currently streaming. The agent's
+    # terminal "final" event carries the authoritative text of the LAST round,
+    # so `segment` is only needed for the earlier (tool) rounds and the
+    # error path.
+    turn_parts: list[str] = []
+    segment = ""
     try:
         async for event in process_message(
             user_message=user_message,
@@ -214,25 +222,37 @@ async def handle_chat(
             authenticated_partner_id=effective_partner_id,
             session_id=session_id, #for health check of the session
         ):
-            if event.get("type") == "interim":
-                # Forward narration to the client the moment the agent emits it.
-                interim_steps.append(event["content"])
-                yield {"type": "interim", "content": event["content"]}
+            etype = event.get("type")
 
-            elif event.get("type") == "final":
+            if etype == "delta":
+                # Forward the token immediately; remember it for persistence.
+                segment += event.get("content") or ""
+                yield event
+
+            elif etype == "tool_start":
+                # Round boundary: bank the streamed narration (if any) and let
+                # the client switch to its busy indicator.
+                if segment.strip():
+                    turn_parts.append(segment.strip())
+                segment = ""
+                yield {"type": "tool_start"}
+
+            elif etype == "final":
+                # The agent's content supersedes `segment` for the last round —
+                # they're identical in the normal case, but the agent's version
+                # also covers the reasoning-trace fallback where nothing streamed.
                 reply = event.get("content") or ""
                 verified_partner_id = event.get("verified_partner_id")
+                full_turn = _join_turn(turn_parts, reply)
 
                 # ---------------------------------------------------------
                 # Persist the whole assistant turn BEFORE emitting the final
                 # event, so a client disconnect right after it can't lose the
-                # saved messages. Interim steps + reply are stored as ONE
-                # assistant message, so a page reload shows the single continuous
-                # message the user saw live.
+                # saved messages. All segments + reply are stored as ONE
+                # assistant message, so a page reload shows the single
+                # continuous message the user saw live.
                 # ---------------------------------------------------------
-                await message_svc.create(
-                    session_id, "assistant", _join_turn(interim_steps, reply)
-                )
+                await message_svc.create(session_id, "assistant", full_turn)
 
                 # Update last_activity. Skipped when verify_email_otp just ran
                 # this turn: that MCP tool already touched the session row, and
@@ -244,7 +264,7 @@ async def handle_chat(
                     except Exception as exc:
                         _logger.warning("chat: touch_activity failed: %s", exc)
 
-                yield {"type": "final", "content": reply, "summarized": did_summarize}
+                yield {"type": "final", "content": full_turn, "summarized": did_summarize}
 
     except session_svc.SessionClosed:
         _logger.info(
@@ -256,11 +276,13 @@ async def handle_chat(
     except Exception as exc:
         _logger.exception("chat: agent pipeline error: %s", exc)
         reply = "Sorry, I encountered an error. Please try again."
-        # Persist whatever the user already saw (interim steps) plus the error
-        # reply as one message, so the turn isn't lost on reload.
+        # Persist whatever the user already saw (banked segments + whatever was
+        # mid-stream) plus the error line, as one message.
+        if segment.strip():
+            turn_parts.append(segment.strip())
         try:
             await message_svc.create(
-                session_id, "assistant", _join_turn(interim_steps, reply)
+                session_id, "assistant", _join_turn(turn_parts, reply)
             )
         except Exception as persist_exc:
             _logger.warning("chat: error-path persistence failed: %s", persist_exc)
