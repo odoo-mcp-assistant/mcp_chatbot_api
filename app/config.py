@@ -57,6 +57,22 @@ class Settings(BaseSettings):
     # if the AI loop takes longer than this, the request is cancelled
     request_timeout: int = 118
 
+    # --- Abuse / cost protection (Tier 0) ---
+    # Hard ceiling on a single chat message. Every character is eventually fed
+    # to the LLM and billed, so this caps the cost of one request and blocks
+    # someone pasting a whole document to drain tokens. Measured in characters.
+    max_message_length: int = 2000
+
+    # Per-caller request throttling for POST /message, expressed in the
+    # `limits` syntax ("count/period"). Two independent ceilings are applied:
+    #   - rate_limit_message_burst: short-window guard that stops rapid-fire
+    #     scripting (default: at most 1 message every 2 seconds).
+    #   - rate_limit_message: sustained guard that caps total volume over a
+    #     longer window (default: 20 messages per minute).
+    # A request that trips either ceiling gets HTTP 429 before any LLM call.
+    rate_limit_message_burst: str = "1/2 seconds"
+    rate_limit_message: str = "20/minute"
+
     # cors_origins_list is a computed property — it converts the raw comma-separated string
     # into a Python list that CORSMiddleware can actually use
     # e.g. "https://a.com, https://b.com" → ["https://a.com", "https://b.com"]

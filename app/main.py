@@ -19,6 +19,14 @@ from fastapi import FastAPI
 # CORSMiddleware: the piece that allows the Odoo browser widget to call this API
 from fastapi.middleware.cors import CORSMiddleware
 
+# RateLimitExceeded: raised by slowapi when a caller exceeds a limit
+# _rate_limit_exceeded_handler: turns that into a clean HTTP 429 response
+from slowapi.errors import RateLimitExceeded
+from slowapi import _rate_limit_exceeded_handler
+
+# limiter: the shared throttler applied to POST /message (see ratelimit.py)
+from .ratelimit import limiter
+
 # get_settings: reads our .env file and returns all infrastructure config (ports, passwords, etc.)
 from .config import get_settings
 
@@ -75,6 +83,12 @@ app = FastAPI(
     ),
     lifespan=lifespan,             # wire up the startup/shutdown function we defined above
 )
+
+# Register the shared rate limiter. slowapi reads the limiter back off
+# app.state inside the @limiter.limit(...) decorator, and the exception
+# handler converts a tripped limit into a clean HTTP 429 response.
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # Read the .env settings once and store them — we need cors_origins_list below
 _settings = get_settings()

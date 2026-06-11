@@ -6,12 +6,21 @@ import logging
 # BackgroundTasks: schedules functions to run AFTER the HTTP response is sent to the client
 # Depends: injects the result of another function (here: current_principal) into the route
 # HTTPException: raised to return an HTTP error response (e.g. 400, 401)
+# Request: the raw request object — slowapi needs it to read the caller's rate-limit key
 # status: namespace of HTTP status code constants (status.HTTP_400_BAD_REQUEST = 400)
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 
 # Principal: dataclass describing the authenticated caller (partner_id / session_token / anonymous)
 # current_principal: FastAPI dependency that verifies the JWT and returns a Principal
 from ..auth import Principal, current_principal
+
+# get_settings: reads the .env config; used here for the message-length cap and
+# rate-limit strings so both stay configurable without code changes
+from ..config import get_settings
+
+# limiter: shared slowapi throttler — its .limit() decorator caps how fast a
+# single caller may POST /message (see ratelimit.py)
+from ..ratelimit import limiter
 
 # handle_chat: the orchestrator that runs the agent loop, saves messages, and triggers summaries
 from ..chat_pipeline import handle_chat
@@ -51,8 +60,17 @@ router = APIRouter(prefix="/mcp_chatbot", tags=["chatbot"])
 
 # POST /mcp_chatbot/message — called by the widget when the user hits "Send"
 # response_model=MessageResponse makes FastAPI validate and serialize the return value
+#
+# The two @limiter.limit decorators throttle this endpoint per caller (keyed by
+# partner_id when logged in, else client IP — see ratelimit.py). A request that
+# trips either ceiling is rejected with HTTP 429 before any LLM work happens.
+# The limits are read from .env via lambdas so they can be tuned without a code
+# change. Both decorators require the `request: Request` parameter below.
 @router.post("/message", response_model=MessageResponse)
+@limiter.limit(lambda: get_settings().rate_limit_message_burst)  # short-window: stop rapid-fire
+@limiter.limit(lambda: get_settings().rate_limit_message)        # sustained: cap total volume
 async def post_message(
+    request: Request,       # required by slowapi to identify the caller; not used directly
     body: MessageRequest,   # request body parsed and validated against MessageRequest
     # Depends(current_principal) tells FastAPI to call current_principal first, verify the JWT,
     # and pass the resulting Principal into this function as `principal`
@@ -64,6 +82,15 @@ async def post_message(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="message is required",
+        )
+    # Length cap — every character is eventually billed by the LLM, so reject
+    # oversized messages (e.g. someone pasting a whole document) before the
+    # agent loop spends any tokens. Limit is configurable via .env.
+    max_length = get_settings().max_message_length
+    if len(user_message) > max_length:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"message is too long (max {max_length} characters)",
         )
     if not principal.session_token and not principal.partner_id:
         raise HTTPException(
