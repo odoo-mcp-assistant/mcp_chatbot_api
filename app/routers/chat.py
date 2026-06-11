@@ -71,6 +71,19 @@ async def post_message(
             detail="session_token is required for anonymous users",
         )
 
+    # Availability gate — the real enforcement of mcp_chatbot.status. The
+    # widget already refuses to send when the status isn't 'online', but that
+    # is cosmetic: anyone holding a valid JWT can call this endpoint directly.
+    # Default-deny (anything other than 'online' blocks) so a missing or
+    # unexpected status value never lets traffic through. Checked BEFORE the
+    # pipeline so an offline chatbot creates no session, persists nothing, and
+    # spends no LLM tokens.
+    if get_odoo_config().status != "online":
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Chatbot is currently offline.",
+        )
+
     # delegate the real work to the pipeline — it runs the agent loop, persists messages,
     # and returns (reply_text, did_summarize) where did_summarize flags that history was compacted
     reply, did_summarize = await handle_chat(principal, user_message)
