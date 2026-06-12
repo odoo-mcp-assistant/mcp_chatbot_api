@@ -149,14 +149,17 @@ async def post_message(
     # Per-identity daily token budget. Same key as the rate limiter:
     # "partner:<id>" for logged-in users, "ip:<addr>" for anonymous visitors —
     # so one heavy user is throttled in isolation and can never exhaust a budget
-    # shared by everyone else. A budget of 0 disables that tier.
+    # shared by everyone else. Two off-switches: the master toggle
+    # (usage_limit_enabled, the admin's "Enable Usage Limits" setting) skips
+    # all budget logic; a budget of 0 disables just that tier. Usage is still
+    # RECORDED below either way — the toggle stops enforcement, not the meter.
     identity_key = identity_key_for(principal, request)
     budget = (
         cfg.daily_token_budget_authenticated
         if principal.partner_id
         else cfg.daily_token_budget_anonymous
     )
-    if budget > 0:
+    if cfg.usage_limit_enabled and budget > 0:
         try:
             used_today = await usage_svc.get_today_tokens(identity_key)
         except Exception as exc:
@@ -219,7 +222,7 @@ async def post_message(
     # raising the ceiling and making the warning premature. The cheap base-
     # budget pre-filter keeps the session lookup off the common path.
     usage_warning = False
-    if budget > 0 and new_total >= USAGE_WARNING_RATIO * budget:
+    if cfg.usage_limit_enabled and budget > 0 and new_total >= USAGE_WARNING_RATIO * budget:
         effective = budget + await _anonymous_budget_bonus(principal, cfg)
         usage_warning = new_total >= USAGE_WARNING_RATIO * effective
 

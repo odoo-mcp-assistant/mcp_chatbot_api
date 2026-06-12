@@ -17,6 +17,7 @@ Keys read
     mcp_chatbot.idle_timeout         (default 30 minutes)
     mcp_chatbot.bot_name             (default "AI Assistant")
     mcp_chatbot.status               (default "online")
+    mcp_chatbot.usage_limit_enabled  (default True; master switch for budgets)
     mcp_chatbot.daily_token_budget_authenticated  (default 500000; 0 disables)
     mcp_chatbot.daily_token_budget_anonymous      (default 300000; 0 disables)
     mcp_chatbot.verified_anonymous_bonus          (default 200000)
@@ -62,6 +63,11 @@ class OdooConfig:
     idle_timeout: int
     bot_name: str
     status: str
+    # Master switch for the daily token budgets below. When False the budget
+    # check is skipped entirely, but usage is still recorded — accounting and
+    # enforcement are separate concerns (the meter keeps running so the admin
+    # has real data when turning the limit back on).
+    usage_limit_enabled: bool
     # Per-identity daily token budgets (0 = that budget is disabled).
     daily_token_budget_authenticated: int
     daily_token_budget_anonymous: int
@@ -135,6 +141,10 @@ def load_odoo_config() -> OdooConfig:
         idle_timeout    = int(param.get_param("mcp_chatbot.idle_timeout") or "30"),
         bot_name        = param.get_param("mcp_chatbot.bot_name") or "AI Assistant",
         status          = param.get_param("mcp_chatbot.status") or "online",
+        # Stored by the addon as the strings 'True'/'False' (never a deleted
+        # param), so a missing value only happens on a fresh install → default
+        # to enabled, the safe side for a public chatbot.
+        usage_limit_enabled = (param.get_param("mcp_chatbot.usage_limit_enabled") or "True").strip().lower() == "true",
         daily_token_budget_authenticated = int(param.get_param("mcp_chatbot.daily_token_budget_authenticated") or "500000"),
         daily_token_budget_anonymous     = int(param.get_param("mcp_chatbot.daily_token_budget_anonymous") or "300000"),
         verified_anonymous_bonus         = int(param.get_param("mcp_chatbot.verified_anonymous_bonus") or "200000"),
@@ -150,9 +160,10 @@ def load_odoo_config() -> OdooConfig:
     _logger.info(
         "odoo_config loaded: bot_name=%r, mcp_server=%r, model=%r, "
         "max_tool_rounds=%d, summary_interval=%d, "
-        "daily_budget(auth=%d, anon=%d)",
+        "usage_limit=%s, daily_budget(auth=%d, anon=%d)",
         cfg.bot_name, cfg.mcp_server_url, cfg.llm.model_name,
         cfg.max_tool_rounds, cfg.summary_interval,
+        "on" if cfg.usage_limit_enabled else "OFF",
         cfg.daily_token_budget_authenticated, cfg.daily_token_budget_anonymous,
     )
     return cfg
