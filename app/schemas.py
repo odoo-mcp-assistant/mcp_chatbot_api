@@ -10,6 +10,10 @@ class MessageRequest(BaseModel):
 class MessageResponse(BaseModel):
     reply: str
     summarized: bool = False
+    # True when this turn pushed the caller past ~90% of their daily token
+    # budget — the widget shows a one-time "approaching today's limit" notice
+    # so the eventual block doesn't feel like a wall out of nowhere.
+    usage_warning: bool = False
 
 
 class HistoryMessage(BaseModel):

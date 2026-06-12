@@ -60,6 +60,36 @@ _logger = logging.getLogger(__name__)
 # tags=["chatbot"] groups them together in the auto-generated /docs page
 router = APIRouter(prefix="/mcp_chatbot", tags=["chatbot"])
 
+# Fraction of the daily budget at which the response starts carrying a
+# usage_warning flag, so the widget can warn the user before the hard block.
+USAGE_WARNING_RATIO = 0.9
+
+
+async def _anonymous_budget_bonus(principal: Principal, cfg) -> int:
+    """Extra daily allowance an anonymous session may have earned.
+
+    - +verified_anonymous_bonus once the session is OTP-verified
+    - +otp_pending_grace while verification is in progress (so an
+      over-budget visitor can still finish the OTP + order flow)
+
+    The verified bonus supersedes the grace (not stacked). Logged-in callers
+    get 0 — their budget is already the authenticated tier. Fails open to 0:
+    a session-lookup glitch must not block chat.
+    """
+    if principal.partner_id or not principal.session_token:
+        return 0
+    try:
+        sess = await session_svc.lookup_by_token(principal.session_token)
+    except Exception as exc:
+        _logger.warning("message: session lookup failed for budget bonus: %s", exc)
+        return 0
+    if sess and sess.get("state") == "open":
+        if sess.get("partner_id"):
+            return cfg.verified_anonymous_bonus
+        if sess.get("otp_pending"):
+            return cfg.otp_pending_grace
+    return 0
+
 
 # POST /mcp_chatbot/message — called by the widget when the user hits "Send"
 # response_model=MessageResponse makes FastAPI validate and serialize the return value
@@ -134,35 +164,28 @@ async def post_message(
             _logger.warning("message: usage read failed for %s: %s", identity_key, exc)
             used_today = 0
 
-        # Anonymous visitors can lift their ceiling for the current session:
-        #   - +verified_anonymous_bonus once the session is OTP-verified
-        #   - +otp_pending_grace while verification is in progress (so an
-        #     over-budget visitor can still finish the OTP + order flow)
-        # The verified bonus supersedes the grace (not stacked). We only pay for
-        # the extra session lookup once the caller has actually hit the base
-        # budget — under it, the bonus can't change the allow/deny outcome.
+        # Anonymous visitors can lift their ceiling for the current session
+        # (verified bonus / otp-pending grace — see _anonymous_budget_bonus).
+        # We only pay for the extra session lookup once the caller has actually
+        # hit the base budget — under it, the bonus can't change the outcome.
         effective_budget = budget
-        if (
-            used_today >= budget
-            and not principal.partner_id
-            and principal.session_token
-        ):
-            try:
-                sess = await session_svc.lookup_by_token(principal.session_token)
-            except Exception as exc:
-                _logger.warning("message: session lookup failed for budget grace: %s", exc)
-                sess = None
-            if sess and sess.get("state") == "open":
-                if sess.get("partner_id"):
-                    effective_budget += cfg.verified_anonymous_bonus
-                elif sess.get("otp_pending"):
-                    effective_budget += cfg.otp_pending_grace
+        if used_today >= budget:
+            effective_budget += await _anonymous_budget_bonus(principal, cfg)
 
         if used_today >= effective_budget:
-            # Structured detail so the widget can tell this apart from a
-            # rate-limit 429 (which means "slow down", not "done for today").
+            # Distinct status from the rate limiter's 429: a budget block means
+            # "you've spent your daily quota", not "you're going too fast". 402
+            # Payment Required is the conventional "quota/billing exhausted"
+            # code, and it keeps the access log from reading "Too Many Requests"
+            # for what is really a budget event. The widget keys off detail.code
+            # (not the status), so it still tells this apart from a rate-limit
+            # hit. An explicit log line makes the cause unambiguous in the logs.
+            _logger.info(
+                "message: daily budget exceeded for %s (used=%d, budget=%d)",
+                identity_key, used_today, effective_budget,
+            )
             raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                status_code=status.HTTP_402_PAYMENT_REQUIRED,
                 detail={
                     "code": "daily_budget_exceeded",
                     "message": "You've reached today's usage limit. Please try again tomorrow.",
@@ -178,8 +201,9 @@ async def post_message(
     # Charge this turn's tokens to the caller. Best-effort: an accounting write
     # must never fail the user's reply. The check above runs on the PRE-turn
     # total, so a caller can overshoot by at most one turn — acceptable.
+    new_total = 0
     try:
-        await usage_svc.record_usage(
+        new_total = await usage_svc.record_usage(
             identity_key,
             tokens_used,
             partner_id=principal.partner_id,
@@ -188,7 +212,22 @@ async def post_message(
     except Exception as exc:
         _logger.warning("message: usage record failed for %s: %s", identity_key, exc)
 
-    return MessageResponse(reply=reply, summarized=did_summarize)
+    # Soft warning: flag the response once this turn pushed the caller past
+    # ~90% of their effective budget, so the widget can warn before the hard
+    # block lands. The bonus is recomputed here (not reused from the pre-check)
+    # because the session may have just OTP-verified DURING this very turn —
+    # raising the ceiling and making the warning premature. The cheap base-
+    # budget pre-filter keeps the session lookup off the common path.
+    usage_warning = False
+    if budget > 0 and new_total >= USAGE_WARNING_RATIO * budget:
+        effective = budget + await _anonymous_budget_bonus(principal, cfg)
+        usage_warning = new_total >= USAGE_WARNING_RATIO * effective
+
+    return MessageResponse(
+        reply=reply,
+        summarized=did_summarize,
+        usage_warning=usage_warning,
+    )
 
 
 # GET /mcp_chatbot/history — called by the widget on load to restore previous messages in the chat window
