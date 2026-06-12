@@ -73,6 +73,25 @@ class Settings(BaseSettings):
     rate_limit_message_burst: str = "1/2 seconds"
     rate_limit_message: str = "20/minute"
 
+    # --- Client IP resolution (Tier 1, edge protection) ---
+    # The per-IP rate limit and anonymous daily budget are only as good as
+    # the IP they key on, and forwarding headers (X-Forwarded-For,
+    # CF-Connecting-IP) are plain text any client can fake. These two
+    # settings define when such headers may be believed:
+    #
+    #   trusted_proxies   — comma-separated IPs/CIDRs of reverse proxies WE
+    #                       control (e.g. local nginx). Forwarding headers are
+    #                       honoured ONLY when the TCP peer is in this list;
+    #                       a request arriving from anywhere else uses the
+    #                       socket address and its headers are ignored.
+    #                       Default: loopback only.
+    #   client_ip_header  — single header carrying the real visitor IP, set
+    #                       by the edge. Behind Cloudflare: CF-Connecting-IP.
+    #                       Empty → fall back to parsing X-Forwarded-For
+    #                       right-to-left, skipping trusted hops.
+    trusted_proxies: str = "127.0.0.1,::1"
+    client_ip_header: str = ""
+
     # cors_origins_list is a computed property — it converts the raw comma-separated string
     # into a Python list that CORSMiddleware can actually use
     # e.g. "https://a.com, https://b.com" → ["https://a.com", "https://b.com"]
@@ -80,6 +99,23 @@ class Settings(BaseSettings):
     @property
     def cors_origins_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    # Parsed form of trusted_proxies: a list of ip_network objects ready for
+    # "addr in net" membership tests. Invalid entries are skipped (and a bad
+    # entry can only make the config MORE strict, never more permissive).
+    @property
+    def trusted_proxy_networks(self) -> list:
+        import ipaddress
+        networks = []
+        for item in self.trusted_proxies.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            try:
+                networks.append(ipaddress.ip_network(item, strict=False))
+            except ValueError:
+                pass
+        return networks
 
 
 # @lru_cache makes this function only run ONCE — after the first call, the result

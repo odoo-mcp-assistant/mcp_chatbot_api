@@ -24,6 +24,7 @@ vouched for, so they are keyed by partner_id — this keeps several genuine
 users behind one shared office IP from throttling each other.
 """
 
+import ipaddress
 import logging
 
 from fastapi import HTTPException, Request
@@ -33,25 +34,67 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from .auth import Principal, verify_token
+from .config import get_settings
 
 _logger = logging.getLogger(__name__)
 
 
-def _client_ip(request: Request) -> str:
-    """Best-effort source IP, honouring a reverse proxy's X-Forwarded-For.
+def _is_trusted_proxy(ip: str) -> bool:
+    """True when `ip` belongs to a reverse proxy we control (TRUSTED_PROXIES).
 
-    When the service runs behind nginx / Cloudflare, ``request.client.host`` is
-    the proxy, not the visitor, which would lump every anonymous caller into a
-    single bucket. The left-most X-Forwarded-For entry is the original client.
-
-    Caveat: X-Forwarded-For is client-spoofable unless a trusted proxy sets it.
-    That is acceptable here because edge filtering (Tier 1) is the layer meant
-    to sanitise this header; this throttle is a cheap second line of defence.
+    Anything unparseable is untrusted — failing closed here can only make us
+    ignore a forwarding header, never believe a forged one.
     """
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(addr in net for net in get_settings().trusted_proxy_networks)
+
+
+def _client_ip(request: Request) -> str:
+    """The visitor's real source IP, honouring forwarding headers only when
+    they come from a proxy we trust.
+
+    Forwarding headers (X-Forwarded-For, CF-Connecting-IP) are plain text the
+    client can type, so believing them unconditionally would let an abuser
+    mint a fresh fake "IP" per request — bypassing both the per-IP rate limit
+    and the anonymous daily budget. The trust rule:
+
+    1. If the TCP peer is NOT in TRUSTED_PROXIES, the request reached us
+       directly: use the socket address, ignore every forwarding header.
+    2. If the peer IS trusted and CLIENT_IP_HEADER is configured (behind
+       Cloudflare: CF-Connecting-IP, which the edge overwrites on every
+       request), use that header.
+    3. Otherwise walk X-Forwarded-For right-to-left and return the first hop
+       that isn't a trusted proxy — hops to the left of that are claims
+       written by the client, not observations made by our infrastructure.
+
+    Note the edge must actually be exclusive for (2) to hold: if the origin
+    accepts traffic from anywhere (no firewall allow-list), an attacker can
+    bypass Cloudflare and forge its header from a "trusted" local path. See
+    docs/cloudflare_setup.md in the addon repo.
+    """
+    peer = get_remote_address(request)
+    if not _is_trusted_proxy(peer):
+        return peer
+
+    settings = get_settings()
+    if settings.client_ip_header:
+        value = request.headers.get(settings.client_ip_header)
+        if value:
+            return value.strip()
+
     forwarded = request.headers.get("x-forwarded-for")
     if forwarded:
-        return forwarded.split(",")[0].strip()
-    return get_remote_address(request)
+        hops = [h.strip() for h in forwarded.split(",") if h.strip()]
+        for hop in reversed(hops):
+            if not _is_trusted_proxy(hop):
+                return hop
+
+    # Trusted peer, no usable forwarding info — e.g. a health check from the
+    # proxy itself, or local dev hitting uvicorn directly from loopback.
+    return peer
 
 
 def identity_key_for(principal: Principal, request: Request) -> str:
